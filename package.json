@@ -1,0 +1,19 @@
+{
+  "name": "labtracer",
+  "version": "1.0.0",
+  "description": "Local 3D homelab modeller: topology, room view, device configs, network simulation",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "esbuild src/main.js --bundle --format=iife --minify --target=chrome90,firefox90 --outfile=app/app.js",
+    "dev": "esbuild src/main.js --bundle --format=iife --sourcemap --outfile=app/app.js --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "three": "^0.170.0"
+  },
+  "type": "module"
+}

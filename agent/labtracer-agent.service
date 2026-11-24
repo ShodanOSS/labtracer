@@ -1,0 +1,45 @@
+[Unit]
+Description=LabTracer check agent (read-only ping and TCP checks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=labtracer
+Group=labtracer
+ExecStart=/usr/bin/python3 /opt/labtracer-agent/labtracer_agent.py --config /etc/labtracer-agent/agent.json
+StateDirectory=labtracer-agent
+Restart=on-failure
+RestartSec=10
+
+# Sandbox. The agent needs only outbound IPv4/IPv6 and its own state folder.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+# Resource limits, so the agent can never starve the domain controller.
+MemoryMax=64M
+CPUQuota=20%
+TasksMax=48
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

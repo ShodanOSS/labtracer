@@ -1,0 +1,35 @@
+# LabTracer .gitignore
+# Ignore everything by default, then allow only the app files.
+# Personal data (labs, library, exports, agent token) lives in data/ and stays local.
+# Check before each commit:  git status --ignored   and   gitleaks detect --source .
+
+/*
+
+!/.gitignore
+!/README.md
+!/package.json
+!/package-lock.json
+!/server.py
+!/start.bat
+!/start.sh
+!/app/
+!/src/
+!/agent/
+
+# Never commit these, even inside allowed folders
+/agent/agent.json
+/agent/targets.json
+*.local.*
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.tmp
+*.map
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
