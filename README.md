@@ -8,16 +8,18 @@ It has:
 - A 3D room view. This view shows racks, furniture and the physical location of each device.
 - A properties panel for each device and each link.
 - A device console with IOS-style commands.
+- A real SSH console to the device (optional, needs server.py).
 - A simple network simulator for `ping` and `traceroute`.
 - Config files for each device, with dated snapshots, diff and restore.
 - Custom objects. You can make a new device type and import a `.glb` 3D model for it.
 
-All data stays on your computer. The app does not connect to the internet.
+All data stays on your computer. The app does not connect to the internet. The SSH console connects only to the devices that you select.
 
 ## Requirements
 
 - Python 3.8 or later. The server uses only the standard library.
 - A current browser: Chrome, Edge or Firefox. WebGL must be on.
+- Optional, for the SSH console: `pip install paramiko`. For the System ssh engine on Windows: `pip install pywinpty`.
 - Node.js is NOT necessary to run the app. It is necessary only to rebuild `app/app.js` from `src/`.
 
 Target hardware: an 8th generation Intel Core i5 with 8 GB RAM and integrated graphics. The server uses approximately 20 MB of RAM. The browser tab uses approximately 200 to 300 MB (measured: 280 MB with software rendering, 6 MB of it JavaScript heap). The app does not draw frames when idle.
@@ -59,6 +61,7 @@ You can open `app/index.html` directly in the browser. In this mode, the app kee
 | `data/library.json` | Your custom objects (device templates). |
 | `data/export/<lab>/<device>/` | Config files from File > Export all configs. |
 | `data/monitor.json` | Agent address and token. Do not put this file in git. |
+| `data/ssh/known_hosts` | Host keys that you trusted in the SSH console (paramiko engine). |
 
 The `.gitignore` keeps the `data` folder out of git. Your labs, custom objects, exported configs and the agent token stay on your computer.
 
@@ -97,7 +100,7 @@ In the room view:
 1. Find the device type in the left panel.
 2. Drag it onto the canvas. Or click it, then click a location.
 
-Room objects (racks, desks, shelves) go into the room view only. Virtual machines, containers and the Internet cloud go into the topology view only.
+Room objects (racks: 42U, half rack 24U, wall rack 12U; desks, shelves) go into the room view only. Virtual machines, containers and the Internet cloud go into the topology view only.
 
 ## Connect devices
 
@@ -110,6 +113,27 @@ Room objects (racks, desks, shelves) go into the room view only. Virtual machine
 Select "New port…" in the port list to add a port to the device.
 
 Each cable plugs into the position of its port on the 3D model. Switch, firewall and patch panel ports are on the front. Server, PC, NAS and router ports (network, iLO or BMC, console, power) are on the back, as on real equipment. Wireless links start at the top of the device. Tunnel and virtual links start at the centre. To join all cables at the device centre, turn off File > Settings > "Cables plug into their real port position".
+
+## Wall ports
+
+Wall ports (single or double, in Infrastructure) work like a small patch panel. The front jack `1F` is in the room. The rear jack `1R` is the cable in the wall. Link the device to `1F`, and link `1R` to the switch (for example the unmanaged switch). The simulator passes traffic from `1F` to `1R`.
+
+In the room view, a wall port snaps to the nearest wall when you drop it, and faces into the room. Any other device (for example a TV) can do the same: open its Physical tab and turn on "Mounted on a wall".
+
+## Cable routes
+
+In the room view, cables can hang or follow the room:
+
+| Route | Result |
+|---|---|
+| Hanging (gravity) | The cable sags between the two ports. |
+| Along the floor | Down to the floor, along the floor, up to the other port. |
+| Clipped to walls | Down to the floor, to the nearest wall, along the skirting board (around corners), and back out. |
+| Ceiling tray | Up to a tray below the ceiling, across, and down. |
+
+Set the default for the lab in the lab panel (click empty space): "Cable routing in the room view". To change one cable, select it and set "Cable route (room view)". Cables inside one rack and leads shorter than 0.5 m always hang. Parallel cables are spread a little, so they show as a bundle.
+
+The link panel shows the cable length as drawn in the room view. Use it to choose the cable length to buy (add some slack).
 
 ## Move a cable
 
@@ -124,6 +148,20 @@ After you move a cable, examine the port settings on the new port. For example, 
 
 A port can have one link. Wireless ports and tunnel ports can have many links. For example, one AP radio serves many clients.
 
+## Wireless, SSIDs and IoT devices
+
+An access point (or a router with a wifi port and "Bridges L2" on) can broadcast SSIDs. Each SSID puts its clients on one VLAN.
+
+1. Select the access point. Open the Routing tab.
+2. Under "Wireless SSIDs", click "+ SSID". Set the name, the VLAN and the security.
+3. Make sure that the uplink of the access point carries that VLAN (trunk).
+4. Link a wifi client (for example a device from the IoT group in the left panel) to a radio port of the access point. The client joins the first SSID.
+5. To change the SSID, select the wireless link and change "SSID on …". Or open the Ports tab of the client, expand its wifi port and set "Joins SSID".
+
+All radios of the access point broadcast all its SSIDs. The topology view shows the SSID on each wireless link. `show wlan` in the console lists the SSIDs and their clients.
+
+If an access point has no SSIDs, its clients use the access VLAN of the radio port (older labs work this way).
+
 ## Device properties
 
 | Tab | Contents |
@@ -134,7 +172,7 @@ A port can have one link. Wireless ports and tunnel ports can have many links. F
 | Routing | Static routes, live routing table, ping test, VLAN database. |
 | Services | Services that run on the device. |
 | Configs | Generated running-config and your own config files. |
-| Console | IOS-style command line. |
+| Console | IOS-style command line (Simulated), or a real SSH session to the device (SSH). |
 | Monitor | What the check agent tests on this device, and the live results. |
 
 ### Port kinds
@@ -148,7 +186,7 @@ A port can have one link. Wireless ports and tunnel ports can have many links. F
 | `svi` | VLAN interface (or Linux bridge) for the device's own IP on a VLAN. |
 | `sub` | 802.1Q subinterface on a parent port. |
 | `loop` | Loopback. |
-| `console`, `usb`, `power` | Not part of the IP network. Power ports connect only to power ports. |
+| `console`, `usb`, `video`, `power` | Not part of the IP network. Power ports connect only to power ports, video ports (HDMI, DisplayPort) only to video ports. |
 
 ## Config files and snapshots
 
@@ -165,19 +203,21 @@ File > Export all configs writes every config to `data/export/<lab>/<device>/`.
 Type `?` in a console for the full list. Abbreviations work (`sh run`, `conf t`, `int`, `no sh`, `wr`).
 
 ```
-show running-config | interfaces | ip interface brief | ip route | vlan | neighbors | services | inventory
+show running-config | interfaces | ip interface brief | ip route | vlan | wlan | neighbors | services | inventory
 ping A.B.C.D
 traceroute A.B.C.D
 write memory
 configure terminal
 hostname NAME
-interface NAME          (vlan10 = SVI, eth0.10 = subinterface, lo0, wg0, br0)
+interface NAME          (an existing port, or a new vlan10 = SVI, eth0.10 = subinterface, lo0, wg0, br0;
+                         add physical ports in the Ports tab)
  ip address 192.168.10.10/24
  ip address 192.168.10.10 255.255.255.0
  switchport mode access | trunk | routed
  switchport access vlan 30
  switchport trunk native vlan 1
  switchport trunk allowed vlan 1,11,20-30
+ ssid home-iot           (wifi client: join an SSID)
  shutdown | no shutdown
  description TEXT
 vlan 30 name storage
@@ -185,11 +225,67 @@ ip route 0.0.0.0 0.0.0.0 192.168.10.1
 ip route 0.0.0.0/0 wg0
 ip default-gateway 192.168.10.1
 ip routing | no ip routing
+wlan ssid NAME vlan 50 security wpa2   (access point; no wlan ssid NAME)
 service NAME PORT
 set ATTRIBUTE VALUE
 ```
 
 Console changes go into the model immediately. Use Ctrl+Z to undo them.
+
+## SSH console
+
+The SSH mode of the Console tab opens a real SSH session to the device. server.py makes the SSH connection and relays the terminal to the browser:
+
+```
+browser (terminal)  <-- WebSocket -->  server.py  <-- SSH -->  device
+```
+
+### Install
+
+| Engine | Install | Notes |
+|---|---|---|
+| paramiko (default) | `pip install paramiko` | Uses your keys in `~/.ssh` and ssh-agent. Does not read `~/.ssh/config`. |
+| System ssh | Nothing on Linux. On Windows: `pip install pywinpty`. | Uses the OpenSSH client of the computer, with your `~/.ssh/config`, `known_hosts`, ProxyJump and ssh-agent. |
+
+Restart server.py after the installation. To set the default engine, open File > Settings > "Default SSH engine". A device can use a different engine.
+
+### Connect
+
+1. Select the device. Open the Console tab.
+2. Click "SSH".
+3. Set the fields:
+   - Host. If you keep it empty, LabTracer uses the address of the Monitor tab, or the first IP address in the Ports tab.
+   - Port and User. If you keep User empty, LabTracer uses your local user name.
+   - Engine.
+   - Key file (optional), for example `~/.ssh/id_ed25519`. If you keep it empty, LabTracer uses ssh-agent and the default keys in `~/.ssh`.
+4. Click "Connect".
+5. On the first connection with paramiko, LabTracer shows the fingerprint of the host key. Compare it with the fingerprint on the device. Click "Trust and connect" only if they are the same. The key goes into `data/ssh/known_hosts`. The System ssh engine asks the same question in the terminal and uses your OpenSSH `known_hosts`.
+
+If the host key of a device changes, LabTracer refuses the connection. If the change is expected (for example, you installed the device again), remove the old line from `data/ssh/known_hosts` or from `~/.ssh/known_hosts`.
+
+The session stays open when you select a different device or tab. "SSH ●" shows an open session. The session closes when you click "Disconnect", delete the device, open a different lab, close the browser tab, or after 30 minutes without activity. At most 8 sessions can be open.
+
+If paramiko finds no keys, no ssh-agent or no `known_hosts` file, the terminal shows a message. Set a key file, or use the System ssh engine.
+
+### Password login (not recommended)
+
+Use keys if possible. Some legacy devices have no key-based login. For these devices only:
+
+1. Set "Login" to "Password (not recommended)".
+2. Click "Connect". With paramiko, a dialog asks for the password. With System ssh, the terminal asks for it.
+
+LabTracer never saves the password. It is not in the lab file, in the browser storage or in the `data` folder.
+
+### Legacy devices
+
+Old devices can use algorithms that are off by default: `ssh-rsa`, SHA-1 key exchange (`diffie-hellman-group1-sha1`, `diffie-hellman-group14-sha1`) and CBC ciphers. To use them:
+
+1. Select "Allow legacy algorithms".
+2. Set the engine to "System ssh".
+
+paramiko 5 and later have no SHA-1 key exchange and no `ssh-rsa`. Thus, for legacy devices, use the System ssh engine.
+
+The SSH console is not available when you open `index.html` directly, or when server.py listens on a network address (`--host`).
 
 ## Network simulator
 
@@ -203,6 +299,7 @@ The simulator checks:
 - IP forwarding ("Routes IP") on each hop.
 - The return path. A missing return route makes the ping fail.
 - Shut down ports.
+- SSIDs. A wireless client lands on the VLAN of its SSID. A client on an SSID that the access point does not have gets no connection.
 
 The simulator does NOT check firewall rules, NAT, ARP, STP, DHCP, link speed or the tunnel underlay. Use it to find layout and addressing errors, not policy errors.
 
@@ -281,6 +378,10 @@ If the app is slow:
 - File names are cleaned. The server cannot write outside the `data` folder.
 - The server sends a Content Security Policy that blocks scripts from other origins.
 - There is no authentication. Do not expose the port to a network.
+- The SSH console is off when server.py listens on an address that is not loopback.
+- An SSH session starts with a POST request that must have the `X-LabTracer` header. The server answers with a one-time session ID, which is valid for 30 seconds. The WebSocket must give this ID and must come from the LabTracer page (Origin check).
+- Host, user and key path are validated. server.py starts `ssh` with an argument list, not with a shell.
+- SSH passwords are never stored. New host keys need your confirmation. Changed host keys are refused.
 
 ## Git
 
@@ -288,7 +389,7 @@ The `.gitignore` ignores all files, then allows only the files of the app. This 
 
 These items are never committed:
 
-- The `data` folder: labs, lab history, custom objects, exported configs, agent address and token.
+- The `data` folder: labs, lab history, custom objects, exported configs, agent address and token, SSH host keys.
 - `node_modules`.
 - `agent/agent.json` and `agent/targets.json`.
 - Certificates and keys (`*.pem`, `*.key`, `*.crt`, `*.p12`), `.env` files and files with `.local.` in the name.
@@ -316,6 +417,7 @@ Do this only if you change files in `src/`.
 | Path | Contents |
 |---|---|
 | `server.py` | Local server and storage API. |
+| `ssh_bridge.py` | SSH console: WebSocket, paramiko and System ssh engines. |
 | `app/` | The built web app (`index.html`, `style.css`, `app.js`). |
 | `src/main.js` | App state, undo, save, tools, keyboard. |
 | `src/viewport.js` | Three.js views, picking, dragging, packet animation. |
@@ -329,6 +431,7 @@ Do this only if you change files in `src/`.
 | `src/sample.js` | Example lab (placeholder names and addresses). |
 | `src/store.js` | Storage (server or browser). |
 | `src/monitor.js` | Live status from the check agent. |
+| `src/sshterm.js` | SSH console in the browser (xterm.js). |
 | `agent/` | The check agent, its systemd unit and its instructions. |
 
-Three.js (MIT licence) is bundled into `app/app.js`.
+Three.js and xterm.js (MIT licence) are bundled into `app/app.js` and `app/app.css`.

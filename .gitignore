@@ -10,6 +10,7 @@
 !/package.json
 !/package-lock.json
 !/server.py
+!/ssh_bridge.py
 !/start.bat
 !/start.sh
 !/app/

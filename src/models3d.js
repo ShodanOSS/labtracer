@@ -34,8 +34,8 @@ function rr(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect
 // Each physical port gets a rectangle on the front or back face, in canvas
 // pixels. The same layout drives the textures and the 3D cable anchors, so
 // a cable always plugs into the port you see.
-const BOXY = new Set(['rackmount', 'box', 'tower', 'nas', 'router', 'printer']);
-const WIRED = new Set(['eth', 'sfp', 'console', 'usb', 'power']);
+const BOXY = new Set(['rackmount', 'box', 'tower', 'nas', 'router', 'printer', 'screen']);
+const WIRED = new Set(['eth', 'sfp', 'console', 'usb', 'video', 'power']);
 export function faceSize(dev) {
   const { w, h } = dev.dims;
   const base = dev.shape === 'rackmount' ? 1024 : 512;
@@ -290,6 +290,16 @@ const builders = {
     ring.rotation.x = Math.PI / 2; ring.position.y = h + 0.001; g.add(ring);
     return g;
   },
+  /** TV or monitor: panel on a small stand (no stand when wall mounted). Ports are on the back. */
+  screen(dev) {
+    const g = new THREE.Group(); const { w, h, d } = dev.dims;
+    const body = mat(dev.color);
+    const stand = dev.wall ? 0 : Math.min(0.12, h * 0.15);
+    if (stand) { g.add(box(w * 0.32, 0.012, Math.max(d * 3, 0.18), body)); g.add(box(0.05, stand, 0.025, body, 0, 0, -d * 0.1)); }
+    g.add(box(w, h - stand, d, body, 0, stand, 0));
+    g.add(box(w * 0.96, (h - stand) * 0.93, 0.002, mat('#0d1117', { emissive: '#0a1626' }), 0, stand + (h - stand) * 0.035, d / 2 + 0.001));
+    return g;
+  },
   laptop(dev) {
     const g = new THREE.Group(); const { w, h, d } = dev.dims;
     g.add(box(w, h, d, mat(dev.color)));
@@ -382,17 +392,25 @@ const builders = {
 };
 
 // ---------------------------------------------------------------- custom glTF models
-const gltfCache = new Map(); // templateId -> Promise<Object3D>
+// Saved templates are cached by id; editor previews by their template object.
+// Entry: { p: Promise<Object3D>, scene: Object3D once loaded }
+const gltfById = new Map(), gltfByObj = new WeakMap();
+const cacheOf = tpl => (tpl.id ? [gltfById, tpl.id] : [gltfByObj, tpl]);
 let loader = null;
 function loadGltf(tpl) {
   if (!tpl?.modelData) return null;
-  if (!gltfCache.has(tpl.id)) {
+  const [c, k] = cacheOf(tpl);
+  if (!c.has(k)) {
     loader ||= new GLTFLoader();
-    gltfCache.set(tpl.id, new Promise((res, rej) => loader.load(tpl.modelData, gltf => res(gltf.scene), undefined, rej)));
+    const e = {};
+    e.p = new Promise((res, rej) => loader.load(tpl.modelData, gltf => { e.scene = gltf.scene; res(gltf.scene); }, undefined, rej));
+    e.p.catch(() => {});
+    c.set(k, e);
   }
-  return gltfCache.get(tpl.id);
+  return c.get(k);
 }
-export function forgetModel(tplId) { gltfCache.delete(tplId); }
+/** key: a template id, or the template object used for an editor preview */
+export function forgetModel(key) { if (typeof key === 'object') gltfByObj.delete(key); else gltfById.delete(key); }
 
 /** Fit an object into w*h*d with its base at y=0. */
 function fitInto(obj, w, h, d) {
@@ -413,12 +431,13 @@ function fitInto(obj, w, h, d) {
  */
 export function buildModel(dev, tpl, linked, onAsync) {
   const root = new THREE.Group();
+  const e = tpl && tpl.modelData ? loadGltf(tpl) : null;
+  if (e?.scene) { root.add(fitInto(e.scene.clone(true), dev.dims.w, dev.dims.h, dev.dims.d)); return root; } // cached: no placeholder, no async rebuild
   const fn = builders[dev.shape] || builders.box;
   const placeholder = fn(dev, linked || new Set());
   root.add(placeholder);
-  const p = tpl && tpl.modelData ? loadGltf(tpl) : null;
-  if (p) {
-    p.then(scene => {
+  if (e) {
+    e.p.then(scene => {
       const obj = fitInto(scene.clone(true), dev.dims.w, dev.dims.h, dev.dims.d);
       root.remove(placeholder); disposeTree(placeholder);
       root.add(obj); onAsync && onAsync();

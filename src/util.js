@@ -105,8 +105,9 @@ export function parseCIDR(s) {
   s = String(s).trim();
   let ip, prefix;
   if (s.includes('/')) {
-    const [a, b] = s.split('/');
-    ip = ipToInt(a); prefix = Number(b);
+    const m = /^([^/\s]+)\/(\d{1,2})$/.exec(s); // "10.0.0.1/" or "1.2.3.4/24/5" is not valid
+    if (!m) return null;
+    ip = ipToInt(m[1]); prefix = Number(m[2]);
   } else if (/\s/.test(s)) {
     const [a, b] = s.split(/\s+/);
     ip = ipToInt(a); prefix = maskToPrefix(b);

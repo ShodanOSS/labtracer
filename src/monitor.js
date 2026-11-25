@@ -76,7 +76,7 @@ export class Monitor {
       const r = await fetch('/api/monitor/status', { cache: 'no-store' });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || r.statusText);
-      this.status = j; this.error = '';
+      this.status = j; this.error = ''; this.receivedAt = Date.now();
     } catch (e) { this.fail(e, true); }
     this.app.onMonitorStatus();
   }
@@ -100,7 +100,9 @@ export class Monitor {
   states() {
     const s = this.status; const out = new Map();
     if (!this.live || !s) return out;
-    const stale = s.generated && (Date.now() / 1000 - s.generated) > 3 * (s.interval || 30) + 10;
+    // Age on the agent's own clock (s.now) plus time since we got it, so clock skew between hosts does not matter.
+    const age = (s.now ? s.now - s.generated : Date.now() / 1000 - s.generated) + (Date.now() - (this.receivedAt || Date.now())) / 1000;
+    const stale = s.generated && age > 3 * (s.interval || 30) + 10;
     for (const [id, v] of Object.entries(s.devices || {})) out.set(id, stale ? 'unknown' : v.state);
     return out;
   }

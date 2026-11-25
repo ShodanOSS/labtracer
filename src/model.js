@@ -3,7 +3,10 @@ import { BUILTIN, RACK_U } from './templates.js';
 import { uid, clone } from './util.js';
 
 export const LAB_VERSION = 1;
-export const LINKABLE = new Set(['eth', 'sfp', 'wifi', 'vport', 'tunnel', 'console', 'usb', 'power']);
+export const LINKABLE = new Set(['eth', 'sfp', 'wifi', 'vport', 'tunnel', 'console', 'usb', 'video', 'power']);
+export const NON_IP = new Set(['power', 'console', 'usb', 'video']); // ports outside the IP network
+/** Power only plugs into power, video only into video, everything else is data. */
+export const portFamily = p => (p?.kind === 'power' || p?.kind === 'video' ? p.kind : 'data');
 export const MULTI_LINK = new Set(['wifi', 'tunnel']); // one radio / tunnel serves many peers
 export const L3_KINDS = new Set(['eth', 'sfp', 'wifi', 'vport', 'tunnel', 'svi', 'sub', 'loop']);
 
@@ -48,7 +51,7 @@ export function createDevice(tpl, opts = {}) {
     levels: tpl.levels ? [...tpl.levels] : null,
     color: tpl.color || '#555b66',
     virtual: !!tpl.virtual, logical: !!tpl.logical, physicalOnly: !!tpl.physicalOnly,
-    passthrough: !!tpl.passthrough,
+    passthrough: !!tpl.passthrough, wall: !!tpl.wall,
     l2: !!tpl.l2, l3: !!tpl.l3,
     vendor: tpl.vendor || '', model: tpl.model || '', serial: '', notes: '',
     topo: { x: opts.x ?? 0, z: opts.z ?? 0 },
@@ -57,6 +60,7 @@ export function createDevice(tpl, opts = {}) {
     ports: (tpl.ports || []).map(p => makePort(p)),
     routes: [],
     vlans: tpl.l2 ? [{ id: 1, name: 'default' }] : [],
+    ssids: (tpl.ssids || []).map(s => ({ ...s })), // access point: [{name, vlan, security}]
     services: [],
     files: [],
   };
@@ -103,6 +107,22 @@ export function portIsFree(lab, dev, port) {
 export function endLabel(lab, end) {
   const d = devById(lab, end.dev); const p = portById(d, end.port);
   return `${d ? d.name : '?'}:${p ? p.name : '?'}`;
+}
+
+/** VLAN of an SSID on an access point, or null if the AP does not broadcast it. */
+export function ssidVlan(ap, name) {
+  const s = name ? (ap.ssids || []).find(x => x.name === name && x.enabled !== false) : null;
+  return s ? (s.vlan || 1) : null;
+}
+/** Wireless clients of an access point: [{dev, port, link}] on the far end of its wifi ports. */
+export function wifiClients(lab, ap) {
+  const out = [];
+  for (const l of lab.links) for (const [me, them] of [[l.a, l.b], [l.b, l.a]]) {
+    if (me.dev !== ap.id || portById(ap, me.port)?.kind !== 'wifi') continue;
+    const d = devById(lab, them.dev), p = portById(d, them.port);
+    if (p?.kind === 'wifi') out.push({ dev: d, port: p, link: l });
+  }
+  return out;
 }
 
 export const isRack = d => d.shape === 'rack';
@@ -186,15 +206,22 @@ export function normalizeLab(lab) {
   lab.devices ||= [];
   lab.links ||= [];
   lab.view ||= {};
+  for (const r of lab.rooms) { r.w = +r.w || 4; r.d = +r.d || 3; r.h = +r.h || 2.4; r.name = String(r.name ?? 'Room'); }
   for (const d of lab.devices) {
     d.topo ||= { x: 0, z: 0 };
     d.phys = Object.assign({ roomId: null, x: 0, z: 0, rot: 0, elev: 0, elevAuto: true, mount: 'floor', rackId: null, rackU: null }, d.phys || {});
     d.dims ||= { w: 0.3, h: 0.1, d: 0.3 };
     d.ports = (d.ports || []).map(p => Object.assign(makePort(p), p));
-    d.attrs ||= []; d.routes ||= []; d.vlans ||= []; d.services ||= []; d.files ||= [];
+    d.attrs ||= []; d.routes ||= []; d.vlans ||= []; d.ssids ||= []; d.services ||= []; d.files ||= [];
     for (const f of d.files) f.snapshots ||= [];
+    if (d.ssh) { // SSH console target (no secrets: never a password)
+      d.ssh = Object.assign({ host: '', port: 22, user: '', engine: '', auth: 'key', keyFile: '', legacy: false }, d.ssh);
+      delete d.ssh.password;
+    }
   }
+  for (const d of lab.devices) if (isRack(d) || isFurniture(d)) d.ports = []; // room objects take no cables
   const ids = new Set(lab.devices.map(d => d.id));
-  lab.links = lab.links.filter(l => ids.has(l.a?.dev) && ids.has(l.b?.dev));
+  const hasPort = end => portById(lab.devices.find(d => d.id === end?.dev), end.port);
+  lab.links = lab.links.filter(l => ids.has(l.a?.dev) && ids.has(l.b?.dev) && hasPort(l.a) && hasPort(l.b));
   return lab;
 }

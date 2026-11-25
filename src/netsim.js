@@ -4,7 +4,7 @@
 // missing return route, IP forwarding off, port shut down.
 // Not modelled: firewall rules, NAT, ARP timing, STP, tunnel underlay.
 import { parseCIDR, inSubnet, ipToInt, intToIp, vlanSet } from './util.js';
-import { devById, portById, L3_KINDS, LINKABLE, MULTI_LINK } from './model.js';
+import { devById, portById, L3_KINDS, LINKABLE, MULTI_LINK, ssidVlan } from './model.js';
 
 export function l3Ifaces(dev) {
   const out = [];
@@ -66,7 +66,7 @@ function buildIndex(lab) {
   return { byEnd, devs };
 }
 
-const NOT_SWITCHED = new Set(['power', 'console', 'usb', 'tunnel']);
+const NOT_SWITCHED = new Set(['power', 'console', 'usb', 'video', 'tunnel']);
 const isSwitchport = (dev, p) => dev.l2 && LINKABLE.has(p.kind) && p.mode !== 'routed' && !NOT_SWITCHED.has(p.kind);
 const memberVlan = p => (p.mode === 'trunk' ? (p.nativeVlan || 1) : (p.vlan || 1));
 
@@ -84,7 +84,8 @@ export function l2Reach(lab, dev, port, idx = buildIndex(lab)) {
     const k = d.id + '|' + p.id;
     if (!found.has(k)) found.set(k, { dev: d, port: p, path });
   };
-  const wire = (d, p, tag, path, skipLink) => queue.push({ t: 'wire', d, p, tag, path, skipLink });
+  // ssidV: frames leaving an AP radio reach only the clients whose SSID maps to this VLAN
+  const wire = (d, p, tag, path, skipLink, ssidV = null) => queue.push({ t: 'wire', d, p, tag, path, skipLink, ssidV });
   const sw = (d, vlan, path, inPort, inLink) => queue.push({ t: 'sw', d, vlan, path, inPort, inLink });
 
   // inject the first frame
@@ -111,11 +112,12 @@ export function l2Reach(lab, dev, port, idx = buildIndex(lab)) {
         const end = (link.a.dev === s.d.id && link.a.port === s.p.id) ? link.b : link.a;
         const d2 = idx.devs.get(end.dev); const p2 = d2 && portById(d2, end.port);
         if (!p2 || !p2.enabled) continue;
+        if (s.ssidV !== null && ssidVlan(s.d, p2.ssid) !== s.ssidV) continue;
         const key = d2.id + '|' + p2.id + '|' + s.tag;
         if (seen.has(key)) continue;
         seen.add(key);
         const path = [...s.path, [link.id, s.d.id]];
-        arrive(d2, p2, s.tag, path, link.id);
+        arrive(d2, p2, s.tag, path, link.id, s.p);
       }
     } else {
       const key = s.d.id + '|sw|' + s.vlan;
@@ -128,6 +130,10 @@ export function l2Reach(lab, dev, port, idx = buildIndex(lab)) {
         if (p.ip && memberVlan(p) === s.vlan && p.mode !== 'trunk') record(s.d, p, s.path);
         if (p.id === s.inPort && !MULTI_LINK.has(p.kind)) continue;
         const skip = p.id === s.inPort ? s.inLink : null;
+        if (p.kind === 'wifi' && s.d.ssids?.length) {
+          if (s.d.ssids.some(x => x.enabled !== false && (x.vlan || 1) === s.vlan)) wire(s.d, p, null, s.path, skip, s.vlan);
+          continue;
+        }
         if (p.mode === 'trunk') {
           if (vlanSet(p.trunkVlans)(s.vlan)) wire(s.d, p, s.vlan === (p.nativeVlan || 1) ? null : s.vlan, s.path, skip);
         } else if ((p.vlan || 1) === s.vlan) {
@@ -137,7 +143,7 @@ export function l2Reach(lab, dev, port, idx = buildIndex(lab)) {
     }
   }
 
-  function arrive(d2, p2, tag, path, linkId) {
+  function arrive(d2, p2, tag, path, linkId, fromPort) {
     if (d2.passthrough) {
       // patch panel: 12F <-> 12R
       const m = /^(.*?)([FR])$/i.exec(p2.name);
@@ -145,6 +151,11 @@ export function l2Reach(lab, dev, port, idx = buildIndex(lab)) {
         const partner = d2.ports.find(q => q.name.toUpperCase() === (m[1] + (m[2].toUpperCase() === 'F' ? 'R' : 'F')).toUpperCase());
         if (partner && partner.enabled) wire(d2, partner, tag, path);
       }
+      return;
+    }
+    if (p2.kind === 'wifi' && d2.ssids?.length && isSwitchport(d2, p2)) {
+      const v = ssidVlan(d2, fromPort?.ssid);
+      if (v !== null) sw(d2, v, path, p2.id, linkId); // else: client is not on an SSID of this AP
       return;
     }
     if (isSwitchport(d2, p2)) {
@@ -188,12 +199,23 @@ export function trace(lab, src, dstStr, maxHops = 16) {
     else target = reach.find(e => portOwns(e.port, dst)) || reach.find(e => e.dev.l3);
     if (!target) {
       const what = rt.nexthop === null ? 'no peer' : (rt.nexthop === dst ? `host ${intToIp(dst)}` : `next hop ${intToIp(rt.nexthop)}`);
-      return { ok: false, hops, srcIp, at: cur, reason: `${cur.name}: ${what} not reachable out ${rt.port.name} (no layer 2 path)` };
+      return { ok: false, hops, srcIp, at: cur, reason: `${cur.name}: ${ssidProblem(lab, cur, rt.port) || `${what} not reachable out ${rt.port.name} (no layer 2 path)`}` };
     }
     hops.push({ from: cur, to: target.dev, egress: rt.port.name, ingress: target.port.name, ip: target.port.ip, path: target.path, via: rt.type });
     cur = target.dev;
   }
   return { ok: false, hops, srcIp, at: cur, reason: 'TTL expired (routing loop)' };
+}
+
+/** Explain a wifi client that is not on an SSID of the AP it links to. */
+function ssidProblem(lab, dev, port) {
+  if (port.kind !== 'wifi') return '';
+  for (const l of lab.links) {
+    const end = l.a.dev === dev.id && l.a.port === port.id ? l.b : (l.b.dev === dev.id && l.b.port === port.id ? l.a : null);
+    const ap = end && lab.devices.find(x => x.id === end.dev);
+    if (ap?.ssids?.length && ssidVlan(ap, port.ssid) === null) return port.ssid ? `SSID "${port.ssid}" is not on ${ap.name}` : `${port.name} has not joined an SSID of ${ap.name}`;
+  }
+  return '';
 }
 
 /** Ping = forward trace + return trace from the owner back to our source address. */

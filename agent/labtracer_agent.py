@@ -67,6 +67,8 @@ def _checksum(data: bytes) -> int:
 def _icmp_socket_ping(host: str, timeout: float):
     """ICMP echo through a socket. Tries an unprivileged datagram socket
     first (Linux, needs net.ipv4.ping_group_range), then a raw socket."""
+    if ":" in host:
+        raise PermissionError("IPv6: use the ping binary")
     addr = socket.gethostbyname(host)
     ident = random.randint(0, 0xFFFF)
     payload = struct.pack("!d", time.time()) + b"labtracer"
@@ -232,7 +234,10 @@ class Agent:
                 out.setdefault(tid, {})[i] = (ok, ms, err)
         now = int(time.time())
         with self.lock:
+            current = {t["id"] for t in self.targets}  # targets may have changed during the run
             for t in targets:
+                if t["id"] not in current:
+                    continue
                 prev = self.results.get(t["id"], {})
                 prev_checks = {(_c["type"], _c["host"], _c.get("port")): _c for _c in prev.get("checks", [])}
                 checks = []
@@ -278,13 +283,30 @@ class Agent:
     def snapshot(self):
         with self.lock:
             return {"agent": "labtracer-agent", "version": VERSION, "host": socket.gethostname(),
-                    "interval": self.cfg["interval"], "generated": self.last_run, "targets": len(self.targets),
+                    "interval": self.cfg["interval"], "generated": self.last_run, "now": int(time.time()), "targets": len(self.targets),
                     "devices": self.results}
 
 
 # ---------------------------------------------------------------- HTTP
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "labtracer-agent/" + VERSION
+    timeout = 15  # drop idle or slow clients
+
+    def setup(self):
+        super().setup()
+        self._bad = False
+        if isinstance(self.connection, ssl.SSLSocket):
+            try:  # TLS handshake here, in the worker thread, not in accept()
+                self.connection.do_handshake()
+            except (ssl.SSLError, OSError):
+                self._bad = True
+
+    def handle(self):
+        if not self._bad:
+            super().handle()
 
     def log_message(self, fmt, *args):  # quiet: only errors and target pushes
         pass
@@ -302,7 +324,14 @@ class Handler(BaseHTTPRequestHandler):
     def _auth(self) -> bool:
         token = self.server.agent.cfg["token"]
         if not token:
-            return True
+            # No token (loopback only): refuse other Host names, so a web page
+            # can not reach the agent through DNS rebinding.
+            host = (self.headers.get("Host") or "").strip().lower()
+            if host.startswith("["):
+                host = host[1:host.find("]")] if "]" in host else ""
+            elif host.count(":") == 1:
+                host = host.split(":")[0]
+            return host in LOOPBACK_HOSTS
         got = self.headers.get("Authorization", "")
         return hmac.compare_digest(got.encode(), ("Bearer " + token).encode())
 
@@ -320,8 +349,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
         if self.path != "/targets":
             return self._send({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > MAX_BODY:
+        if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+            # browsers can not send this cross-origin without a preflight, which we never approve
+            return self._send({"error": "Content-Type must be application/json"}, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if n < 0 or n > MAX_BODY:
             return self._send({"error": "too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         try:
             count = self.server.agent.set_targets(json.loads(self.rfile.read(n) or b"[]"))

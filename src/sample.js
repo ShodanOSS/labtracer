@@ -68,8 +68,13 @@ export function buildSampleLab() {
   core.routes.push({ dest: '0.0.0.0/0', via: '192.168.10.1', dev: '' });
 
   const ap = add('net-ap', 'ap-01', { x: 4.5, z: 1.5, notes: 'Ceiling mounted.', phys: { x: 2.0, z: 1.9, elev: 2.36, elevAuto: false } });
-  Object.assign(port(ap, 'wlan0'), { vlan: 40, desc: 'main SSID (VLAN 40)' });
-  ap.ports.push(makePort({ name: 'wlan1', kind: 'wifi', vlan: 50, desc: 'IoT SSID (VLAN 50)' }));
+  ap.ssids = [{ name: 'home', vlan: 40, security: 'wpa3' }, { name: 'home-iot', vlan: 50, security: 'wpa2' }];
+  Object.assign(port(ap, 'wlan0'), { desc: '5 GHz radio' });
+  ap.ports.push(makePort({ name: 'wlan1', kind: 'wifi', speed: '2.4GHz', desc: '2.4 GHz radio' }));
+
+  const plug = add('iot-plug', 'plug-01', { x: 7, z: 3, notes: 'IoT client on the home-iot SSID (VLAN 50).', phys: { x: 1.95, z: 0.3, elev: 0.75 } });
+  Object.assign(port(plug, 'wlan0'), { ip: '192.168.50.20/24', ssid: 'home-iot' });
+  plug.routes.push({ dest: '0.0.0.0/0', via: '192.168.50.1', dev: '' });
 
   // ---- servers and endpoints
   const dc = add('cmp-sbc', 'dc-01', {
@@ -126,6 +131,7 @@ export function buildSampleLab() {
   link(edge, 'lan1', core, 'p1', 'copper', 'trunk');
   link(core, 'p2', dc, 'eth0');
   link(core, 'p3', ap, 'eth0');
+  link(ap, 'wlan1', plug, 'wlan0', 'wireless');
   link(core, 'p4', nas, 'eth0');
   link(core, 'p5', nas, 'eth1');
   link(core, 'p6', desk, 'eth0');

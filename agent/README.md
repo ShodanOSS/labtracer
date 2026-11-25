@@ -35,6 +35,8 @@ You can run the agent on an important host, for example a domain controller. Thu
 - The agent accepts only two check types: ping and TCP connect. It rejects other data in the target list.
 - The agent does not start on a network address without a token of 16 characters or more.
 - Each request must have the token.
+- Without a token (loopback only), the agent accepts only requests with a local Host name. A web page can not reach it through DNS rebinding.
+- A new target list must be sent as `Content-Type: application/json`. A web page can not send that to the agent.
 
 The agent listens on a port on its host. Use nftables to accept that port only from your admin addresses.
 

@@ -2,7 +2,7 @@
 import { h, clear, uid, clone, download, pickFile, readFileText, safeName, fmtTime } from './util.js';
 import { store, makeTar } from './store.js';
 import {
-  Library, newLab, normalizeLab, createDevice, devById, portById, linksOfPort, portIsFree, removeDevice, removePort,
+  Library, newLab, normalizeLab, createDevice, devById, portById, linksOfPort, portIsFree, removeDevice, removePort, portFamily,
   duplicateDevice, uniqueName, makePort, isRack, isFurniture, deviceRoomId, rackFirstFree, LINKABLE, MULTI_LINK,
 } from './model.js';
 import { Viewport } from './viewport.js';
@@ -13,11 +13,16 @@ import { buildSampleLab } from './sample.js';
 import { modal, toast, promptText, confirmBox, popup, closePopup } from './dialogs.js';
 import { MEDIA } from './templates.js';
 import { Monitor } from './monitor.js';
+import { SshManager } from './sshterm.js';
 
 const DEFAULT_SETTINGS = {
   antialias: true, pixelCap: 1.25, labels: true, portLabels: true, cables: true, powerLinks: true,
   rackLabels: false, snap: true, autosave: true, lockLayout: false, portAnchors: true, gridColor: '#2b4a35', bgColor: '#0c130e',
+  sshEngine: 'paramiko',
 };
+
+const UNDO_CHARS = 24e6; // cap undo memory (~50 MB) for big labs with config snapshots
+const NOT_TEXT = new Set(['checkbox', 'radio', 'button', 'color', 'range', 'file']);
 
 class App {
   constructor() {
@@ -45,6 +50,7 @@ class App {
     this.inspector = new Inspector(document.getElementById('inspector'), this);
     this.cli = new Cli(this);
     this.monitor = new Monitor(this);
+    this.ssh = new SshManager(this);
     await this.monitor.loadConfig();
     this.bindToolbar();
     this.bindKeys();
@@ -66,6 +72,7 @@ class App {
 
   // ---------------------------------------------------------------- lab lifecycle
   loadLab(lab, name) {
+    this.ssh?.prune(true); // sessions belong to the devices of the old lab
     this.lab = normalizeLab(lab);
     this.labName = safeName(name || lab.name || 'lab');
     this.lab.name = this.labName;
@@ -98,10 +105,27 @@ class App {
     if (!quiet && ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName) && !ae.classList.contains('term-in')) ae.dispatchEvent(new Event('change'));
     try {
       this.lab.view.mode = this.viewport.mode; this.lab.view.roomId = this.roomId;
-      await store.saveLab(this.labName, this.lab);
-      this.dirty = false; this.lastSaved = Date.now(); this.updateStatus();
+      const snap = this.snap, name = this.labName;
+      await store.saveLab(name, this.lab);
+      if (this.snap === snap && this.labName === name) this.dirty = false; this.lastSaved = Date.now(); this.updateStatus();
       if (!quiet) toast(store.mode === 'server' ? `Saved ${this.labName}` : `Saved ${this.labName} in this browser`, 'ok');
     } catch (e) { toast('Save failed: ' + e.message, 'err', 5000); }
+  }
+  async labExists(name) {
+    try { return (await store.listLabs()).some(l => l.name === name); } catch { return false; }
+  }
+  /** base, base-2, base-3 … : the first name not used by a saved lab. */
+  async freeLabName(base) {
+    let names;
+    try { names = new Set((await store.listLabs()).map(l => l.name)); } catch { return base; }
+    if (!names.has(base)) return base;
+    for (let i = 2; ; i++) if (!names.has(`${base}-${i}`)) return `${base}-${i}`;
+  }
+  async confirmOverwrite(name) {
+    return !(await this.labExists(name)) || confirmBox('Lab exists', `A lab called "${name}" exists. Replace it? (A copy stays in data/labs/.history in server mode.)`, 'Replace', true);
+  }
+  confirmDiscard() {
+    return !this.dirty || confirmBox('Unsaved changes', 'Discard unsaved changes to the current lab?', 'Discard', true);
   }
   async saveLibrary() {
     try { await store.saveLibrary({ templates: this.library.custom }); }
@@ -114,7 +138,8 @@ class App {
     const now = JSON.stringify(this.lab);
     if (now === this.snap) { this.inspector.render(); return; }
     this.undoStack.push({ s: this.snap, label });
-    if (this.undoStack.length > 80) this.undoStack.shift();
+    let bytes = 0; for (const e of this.undoStack) bytes += e.s.length;
+    while (this.undoStack.length > 1 && (this.undoStack.length > 80 || bytes > UNDO_CHARS)) bytes -= this.undoStack.shift().s.length;
     this.redoStack = [];
     this.snap = now;
     this.dirty = true;
@@ -122,6 +147,7 @@ class App {
     else if (scope === 'links') this.viewport.refreshLinks();
     else if (scope && scope.dev) this.viewport.refreshDevice(scope.dev);
     if (this.selection && !this.selectionExists()) this.selection = null;
+    this.ssh.prune(); // close sessions of deleted devices
     this.inspector.render();
     this.renderRoomSelect();
     this.updateStatus(label);
@@ -145,6 +171,7 @@ class App {
     this.lab = JSON.parse(s); this.snap = s; this.dirty = true;
     if (!this.selectionExists()) this.selection = null;
     if (!this.lab.rooms.some(r => r.id === this.roomId)) this.roomId = this.lab.rooms[0]?.id || null;
+    this.ssh.prune();
     this.viewport.rebuildAll(); this.inspector.render(); this.renderRoomSelect(); this.updateStatus();
   }
 
@@ -193,7 +220,8 @@ class App {
       const xs = lab.devices.filter(x => !x.physicalOnly);
       d.topo.x = xs.length ? Math.round(xs.reduce((a, x) => a + x.topo.x, 0) / xs.length) + 2 : 0;
       d.topo.z = xs.length ? Math.max(...xs.map(x => x.topo.z)) + 2 : 0;
-      if (!this.autoRack(d)) this.autoElevate(d);
+      if (d.wall) this.snapToWall(d);
+      else if (!this.autoRack(d)) this.autoElevate(d);
     }
     lab.devices.push(d);
     this.selection = { type: 'device', id: d.id };
@@ -203,13 +231,14 @@ class App {
   placeInRoom(d) {
     const r = this.currentRoom(); if (!r) return;
     Object.assign(d.phys, { roomId: r.id, mount: 'floor', rackId: null, rackU: null, x: r.w / 2, z: r.d / 2 });
-    this.autoElevate(d);
+    if (d.wall) this.snapToWall(d); else this.autoElevate(d);
     this.commit('Place ' + d.name, 'all');
     if (this.viewport.mode !== 'room') this.setMode('room');
   }
 
   /** After a drag in the viewport (model already updated). */
   afterDrag(d) {
+    if (this.viewport.mode === 'room' && d.wall) { this.snapToWall(d); this.commit('Move ' + d.name, { dev: d.id }); return; }
     if (this.viewport.mode === 'room' && !isRack(d) && !isFurniture(d)) {
       if (this.autoRack(d)) { this.commit('Mount ' + d.name, 'all'); return; }
       this.autoElevate(d);
@@ -242,8 +271,18 @@ class App {
     }
     return false;
   }
+  /** Wall-mounted device: move it onto the nearest wall of its room, facing into the room. */
+  snapToWall(d) {
+    const r = this.lab.rooms.find(x => x.id === d.phys.roomId); if (!r) return;
+    const p = d.phys, half = d.dims.d / 2 + 0.005, hw = d.dims.w / 2;
+    const cx = Math.min(r.w - hw, Math.max(hw, p.x)), cz = Math.min(r.d - hw, Math.max(hw, p.z));
+    const dist = [p.z, r.w - p.x, r.d - p.z, p.x]; // walls z=0, x=w, z=d, x=0; the model front is +Z
+    [p.x, p.z, p.rot] = [[cx, half, 0], [r.w - half, cz, 270], [cx, r.d - half, 180], [half, cz, 90]][dist.indexOf(Math.min(...dist))];
+    if (!p.elev) p.elev = d.dims.h < 0.3 ? 0.3 : 1.0;
+    p.elevAuto = false;
+  }
   autoElevate(d) {
-    if (!d.phys.elevAuto || isRack(d) || isFurniture(d) || d.phys.mount === 'rack') return;
+    if (d.wall || !d.phys.elevAuto || isRack(d) || isFurniture(d) || d.phys.mount === 'rack') return;
     const f = this.furnitureUnder(d);
     if (!f || !f.levels?.length) { d.phys.elev = 0; return; }
     const lv = f.levels;
@@ -262,14 +301,20 @@ class App {
       } else {
         const a = this.linkStart, b = { dev: devId, port: portId };
         const pa = portById(devById(lab, a.dev), a.port), pb = portById(d, portId);
-        if ((pa.kind === 'power') !== (pb.kind === 'power')) { toast('Power ports only connect to power ports', 'err'); return; }
+        if (portFamily(pa) !== portFamily(pb)) { toast(`${portFamily(pa) === 'data' ? pb.kind : pa.kind} ports only connect to ${portFamily(pa) === 'data' ? pb.kind : pa.kind} ports`, 'err'); return; }
         const medium = this.linkMedium !== 'auto' ? this.linkMedium : autoMedium(pa, pb);
         lab.links.push({ id: uid('ln'), a, b, medium, label: '', notes: '' });
+        if (pa.kind === 'wifi' && pb.kind === 'wifi') { // client joins the AP's first SSID if it has none yet
+          const da = devById(lab, a.dev);
+          const [apDev, client] = da.ssids?.length ? [da, pb] : (d.ssids?.length ? [d, pa] : []);
+          if (apDev && !client.ssid) client.ssid = apDev.ssids[0].name;
+        }
         this.linkStart = null; this.viewport.setLinkSource(null);
         this.commit(`Link ${d.name}`, 'all');
         toast(`Linked ${devById(lab, a.dev).name}:${pa.name} ↔ ${d.name}:${pb.name}`, 'ok', 1800);
       }
     };
+    if (d.physicalOnly) { toast(`${d.name} is a room object: cables go to the devices in it`, 'warn'); return; }
     const ports = d.ports.filter(p => LINKABLE.has(p.kind));
     const free = ports.filter(p => portIsFree(lab, d, p));
     const items = [];
@@ -323,7 +368,7 @@ class App {
     const t = {
       id: 'cus_' + uid('t').slice(3), name, category: d.category === 'Custom' ? 'Custom' : d.category, shape: d.shape, face: d.face, bays: d.bays,
       dims: { ...d.dims }, uHeight: d.uHeight, rackUnits: d.rackUnits, levels: d.levels, color: d.color, l2: d.l2, l3: d.l3,
-      virtual: d.virtual, physicalOnly: d.physicalOnly, logical: d.logical, passthrough: d.passthrough, vendor: d.vendor, model: d.model,
+      ssids: d.ssids, wall: d.wall, virtual: d.virtual, physicalOnly: d.physicalOnly, logical: d.logical, passthrough: d.passthrough, vendor: d.vendor, model: d.model,
       ports: d.ports.filter(p => !['svi', 'sub', 'loop'].includes(p.kind)).map(p => ({ name: p.name, kind: p.kind, speed: p.speed, mode: p.mode })),
       attrs: Object.fromEntries(d.attrs.filter(a => a.k).map(a => [a.k, ''])),
     };
@@ -360,7 +405,17 @@ class App {
     for (const r of this.lab.rooms) sel.appendChild(h('option', { value: r.id, selected: r.id === this.roomId ? 'selected' : null }, r.name));
     if (!this.lab.rooms.length) sel.appendChild(h('option', { value: '' }, '(no rooms)'));
   }
-  openConsole(id) { this.selection = { type: 'device', id }; this.inspector.tab = 'console'; this.viewport.setSelection(this.selection); this.inspector.render(); }
+  openConsole(id) {
+    const d = devById(this.lab, id);
+    this.selection = { type: 'device', id };
+    this.viewport.setSelection(this.selection);
+    if (d?.physicalOnly) { // rack, desk, shelf: double-click renames instead
+      this.inspector.tab = 'general'; this.inspector.render();
+      const inp = document.querySelector('#inspector [data-k="name"]'); if (inp) { inp.focus(); inp.select(); }
+      return;
+    }
+    this.inspector.tab = 'console'; this.inspector.render();
+  }
 
   async toggleLive() {
     if (this.monitor.live) this.monitor.stop();
@@ -410,7 +465,11 @@ class App {
       { label: 'Export all configs', sub: store.mode === 'server' ? 'to data/export/' : '.tar download', onClick: () => this.exportConfigs(this.lab.devices) },
       { label: 'Export inventory (.csv)', onClick: () => this.exportCsv() },
       '-',
-      { label: 'Load example lab…', onClick: async () => { if (await confirmBox('Example lab', 'Open the example lab as a new lab called "example-lab"?')) { this.loadLab(buildSampleLab(), 'example-lab'); this.dirty = true; this.updateStatus(); } } },
+      { label: 'Load example lab…', onClick: async () => {
+        if (!await this.confirmDiscard()) return;
+        const name = await this.freeLabName('example-lab');
+        if (await confirmBox('Example lab', `Open the example lab as a new lab called "${name}"?`)) { this.loadLab(buildSampleLab(), name); this.dirty = true; this.updateStatus(); }
+      } },
       { label: 'Delete this lab…', cls: 'danger', onClick: () => this.deleteLab() },
       '-',
       { label: 'Settings…', onClick: () => this.settingsDialog() },
@@ -418,8 +477,9 @@ class App {
     ]);
   }
   async newLabDialog() {
-    if (this.dirty && !await confirmBox('Unsaved changes', 'Discard unsaved changes to the current lab?', 'Discard', true)) return;
-    const name = await promptText('New lab', 'Lab name', 'new-lab', 'Create'); if (!name) return;
+    if (!await this.confirmDiscard()) return;
+    const name = await promptText('New lab', 'Lab name', await this.freeLabName('new-lab'), 'Create'); if (!name) return;
+    if (!await this.confirmOverwrite(safeName(name))) return;
     this.loadLab(newLab(safeName(name)), name); await this.save(true);
   }
   async openDialog() {
@@ -432,18 +492,20 @@ class App {
     const m = modal('Open lab', list, [{ label: 'Close' }]);
   }
   async saveAs() {
-    const name = await promptText('Save as', 'New lab name', this.labName + '-copy', 'Save'); if (!name) return;
+    const name = await promptText('Save as', 'New lab name', await this.freeLabName(this.labName + '-copy'), 'Save'); if (!name) return;
+    if (safeName(name) !== this.labName && !await this.confirmOverwrite(safeName(name))) return;
     this.labName = safeName(name); this.lab.name = this.labName;
     document.getElementById('lab-name').textContent = this.labName;
     store.setPref('lastLab', this.labName);
     await this.save();
   }
   async importLab() {
+    if (!await this.confirmDiscard()) return;
     const f = await pickFile('.json,application/json'); if (!f) return;
     try {
       const lab = JSON.parse(await readFileText(f));
       if (!lab.devices) throw new Error('not a LabTracer lab');
-      const name = safeName(lab.name || f.name.replace(/\..*$/, ''));
+      const name = await this.freeLabName(safeName(lab.name || f.name.replace(/\..*$/, ''))); // never autosave over an existing lab
       this.loadLab(lab, name); this.dirty = true; this.updateStatus();
       toast(`Imported ${name}. Press Ctrl+S to save it.`, 'ok', 4000);
     } catch (e) { toast('Import failed: ' + e.message, 'err'); }
@@ -456,10 +518,13 @@ class App {
   }
   async exportConfigs(devices) {
     const files = [];
+    const uniq = (used, n) => { const dot = n.lastIndexOf('.'); const [b, x] = dot > 0 ? [n.slice(0, dot), n.slice(dot)] : [n, '']; let r = n; for (let i = 2; used.has(r.toLowerCase()); i++) r = `${b}-${i}${x}`; used.add(r.toLowerCase()); return r; };
+    const usedDev = new Set();
     for (const d of devices) {
       if (d.physicalOnly) continue;
-      files.push({ device: d.name, name: 'running-config.txt', content: runningConfig(this.lab, d) });
-      for (const f of d.files) files.push({ device: d.name, name: f.name, content: f.content });
+      const dev = uniq(usedDev, safeName(d.name, 'device')), usedFile = new Set(); // "sw 1" and "sw-1" must not share a folder
+      files.push({ device: dev, name: uniq(usedFile, 'running-config.txt'), content: runningConfig(this.lab, d) });
+      for (const f of d.files) files.push({ device: dev, name: uniq(usedFile, safeName(f.name, 'config.txt')), content: f.content });
     }
     if (!files.length) return toast('No configs to export', 'warn');
     try {
@@ -497,7 +562,11 @@ class App {
       chk('cables', 'Cables (room)'), chk('portAnchors', 'Cables plug into their real port position', 'off = cables meet at the device centre'), chk('rackLabels', 'Labels for rack-mounted devices (room)'),
       h('h4', null, 'Editing'),
       chk('snap', 'Snap to grid'), chk('lockLayout', 'Lock layout (no dragging)'),
-      chk('autosave', 'Autosave every 30 s', store.mode === 'server' ? '' : '(server mode only)')),
+      chk('autosave', 'Autosave every 30 s', store.mode === 'server' ? '' : '(server mode only)'),
+      h('h4', null, 'SSH console'),
+      h('label', { class: 'fld' }, h('span', null, 'Default SSH engine'), h('select', { class: 'inp', onchange: e => { s.sshEngine = e.target.value; store.setPref('settings', s); } },
+        [['paramiko', 'paramiko (pip install paramiko)'], ['system', 'System ssh (OpenSSH; uses ~/.ssh/config)']].map(([v, l]) => h('option', { value: v, selected: s.sshEngine === v ? 'selected' : null }, l))),
+        h('small', null, 'A device can override this in its Console tab.'))),
     [{ label: 'Reload now', onClick: () => { location.reload(); } }, { label: 'Done', primary: true }]);
   }
   applySettings() {
@@ -546,7 +615,9 @@ class App {
   }
   bindKeys() {
     document.addEventListener('keydown', e => {
-      const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+      const ae = document.activeElement;
+      if (ae && ae.closest && ae.closest('.xterm')) return; // keys belong to the SSH terminal (Ctrl+S, Ctrl+O too)
+      const typing = ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable || (ae.tagName === 'INPUT' && !NOT_TEXT.has(ae.type)));
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); this.save(); return; }
       if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); this.openDialog(); return; }
@@ -587,6 +658,7 @@ function autoMedium(a, b) {
   const k = new Set([a.kind, b.kind]);
   if (k.has('power')) return 'power';
   if (k.has('tunnel')) return 'tunnel';
+  if (k.has('video')) return 'video';
   if (k.has('console') || k.has('usb')) return 'console';
   if (k.has('wifi')) return 'wireless';
   if (k.has('vport')) return 'virtual';
@@ -594,7 +666,7 @@ function autoMedium(a, b) {
   return 'copper';
 }
 function defaultName(t) {
-  const m = { Network: 'net', Compute: 'host', Storage: 'nas', Virtual: 'vm', Endpoints: 'client', Power: 'ups', WAN: 'wan', Infrastructure: t.shape };
+  const m = { Network: 'net', Compute: 'host', Storage: 'nas', Virtual: 'vm', Endpoints: 'client', IoT: 'iot', Power: 'ups', WAN: 'wan', Infrastructure: t.shape };
   if (t.shape === 'rack') return 'Rack';
   if (t.shape === 'desk') return 'Desk';
   if (t.shape === 'shelf') return 'Shelf';

@@ -8,9 +8,10 @@ import { devById, portById, linkedPortIds, showsInTopology, showsInRoom, deviceR
 import { parseCIDR } from './util.js';
 
 export const MEDIUM_COLORS = {
-  copper: '#4cc2ff', fiber: '#ff9f43', wireless: '#b28dff', tunnel: '#ff5ea8', virtual: '#8a93a6', console: '#7bd88f', power: '#ffd166',
+  copper: '#4cc2ff', fiber: '#ff9f43', wireless: '#b28dff', tunnel: '#ff5ea8', virtual: '#8a93a6', console: '#7bd88f', video: '#5eead4', power: '#ffd166',
 };
 const DASHED = new Set(['wireless', 'tunnel', 'virtual']);
+export const CABLE_ROUTES = [['hang', 'Hanging (gravity)'], ['floor', 'Along the floor'], ['wall', 'Clipped to walls'], ['ceiling', 'Ceiling tray']];
 
 export class Viewport {
   constructor(container, app) {
@@ -153,8 +154,15 @@ export class Viewport {
     }
     const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d)), new THREE.LineBasicMaterial({ color: '#4a6b54' }));
     outline.position.set(w / 2, h / 2, d / 2); outline.userData.ownGeometry = true; this.env.add(outline);
-    const lbl = this.makeLabel(`<b>${escapeHtml(room.name)}</b><span>${w} m × ${d} m × ${h} m</span>`, 'lbl room');
+    const lbl = this.makeLabel(`<b>${escapeHtml(room.name)}</b><span>${escapeHtml(w)} m × ${escapeHtml(d)} m × ${escapeHtml(h)} m</span>`, 'lbl room');
     lbl.position.set(w / 2, 0.02, d + 0.35); this.env.add(lbl);
+  }
+
+  /** Many custom models can finish loading at once: refresh cables once per frame, not once per model. */
+  asyncModelReady() {
+    if (this.asyncPending) return;
+    this.asyncPending = true;
+    requestAnimationFrame(() => { this.asyncPending = false; this.updateSelBox(); this.refreshLinks(); });
   }
 
   makeLabel(html, cls = 'lbl') {
@@ -173,7 +181,7 @@ export class Viewport {
     const root = new THREE.Group();
     root.userData.devId = d.id;
     const model = buildModel(d, this.app.library.get(d.templateId), linkedPortIds(lab, d.id), () => {
-      root.traverse(o => { o.userData.devId = d.id; }); this.updateSelBox(); this.refreshLinks();
+      root.traverse(o => { o.userData.devId = d.id; }); this.asyncModelReady();
     });
     let s = 1;
     if (this.mode === 'topo') { s = topoScale(d); model.scale.setScalar(s); }
@@ -268,7 +276,8 @@ export class Viewport {
       const sag = Math.min(0.4, dist * 0.12);
       c1.y = Math.max(0.02, c1.y - sag); c2.y = Math.max(0.02, c2.y - sag);
     }
-    const curve = new THREE.CubicBezierCurve3(a, c1, c2, b);
+    let curve = new THREE.CubicBezierCurve3(a, c1, c2, b);
+    if (!topo) curve = this.cableRoute(l, ea, eb) || curve;
     const group = new THREE.Group(); group.userData.linkId = l.id;
     let line;
     if (DASHED.has(l.medium)) {
@@ -278,7 +287,7 @@ export class Viewport {
       line.userData.ownMaterial = line.material;
     } else {
       const r = topo ? (l.medium === 'power' ? 0.012 : 0.02) : 0.004;
-      line = new THREE.Mesh(new THREE.TubeGeometry(curve, 28, r, 5, false), new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.25 }));
+      line = new THREE.Mesh(new THREE.TubeGeometry(curve, curve.type === 'CurvePath' ? Math.min(200, Math.max(24, Math.round(curve.getLength() / 0.04))) : 28, r, 5, false), new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.25 }));
       line.userData.ownMaterial = line.material;
     }
     line.userData.ownGeometry = true; line.userData.linkId = l.id;
@@ -296,10 +305,27 @@ export class Viewport {
           pl.position.copy(curve.getPoint(t < 0.5 ? 0.12 : 0.88)); group.add(pl);
         }
       }
-      if (l.label) { const ll = this.makeLabel(escapeHtml(l.label), 'plbl mid'); ll.position.copy(curve.getPoint(0.5)); group.add(ll); }
+      const lt = l.label || (l.medium === 'wireless' ? pa?.ssid || pb?.ssid || '' : '');
+      if (lt) { const ll = this.makeLabel(escapeHtml(lt), 'plbl mid'); ll.position.copy(curve.getPoint(0.5)); group.add(ll); }
     }
     this.linkGroup.add(group);
     this.linkObjs.set(l.id, { group, curve, line });
+  }
+
+  /** Room view: route a cable along the floor, the walls or a ceiling tray. null = let it hang. */
+  cableRoute(l, ea, eb) {
+    const lab = this.app.lab, room = this.app.currentRoom();
+    const route = l.route || lab.cableRoute || 'hang';
+    if (!room || route === 'hang' || DASHED.has(l.medium)) return null;
+    const da = devById(lab, l.a.dev), db = devById(lab, l.b.dev);
+    if (da?.phys.mount === 'rack' && db?.phys.mount === 'rack' && da.phys.rackId === db.phys.rackId) return null; // patch lead in one rack
+    if (Math.hypot(ea.pos.x - eb.pos.x, ea.pos.z - eb.pos.z) < 0.5) return null; // short lead
+    return polyPath(cablePoints(route, ea, eb, room, bundleOffset(l.id)));
+  }
+  /** Cable length in metres as drawn in the room view, or null in the topology view. */
+  cableLength(id) {
+    const lo = this.linkObjs.get(id);
+    return this.mode === 'room' && lo ? lo.curve.getLength() : null;
   }
 
   // ---------------------------------------------------------------- live status
@@ -538,6 +564,52 @@ export class Viewport {
     draw(dev, tpl);
     return { draw, dispose: () => { if (model) disposeTree(model); r.dispose(); } };
   }
+}
+
+// ---------------------------------------------------------------- cable routing
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+/** Small, stable offset per cable so parallel runs show as a bundle, not one line. */
+function bundleOffset(id) { let s = 0; for (let i = 0; i < id.length; i++) s = (s * 31 + id.charCodeAt(i)) >>> 0; return (s % 6) * 0.01; }
+function cablePoints(route, ea, eb, room, off) {
+  const lead = e => (e.normal ? e.pos.clone().addScaledVector(e.normal, 0.06) : e.pos.clone());
+  const a1 = lead(ea), b1 = lead(eb);
+  const floor = 0.012 + off * 0.3;
+  if (route === 'floor' || route === 'ceiling') {
+    const y = route === 'floor' ? floor : room.h - 0.1 - off;
+    return [ea.pos, a1, V(a1.x, y, a1.z), V(b1.x, y, a1.z), V(b1.x, y, b1.z), b1, eb.pos];
+  }
+  // wall: drop to the floor, go to the nearest wall, follow the skirting, come back out
+  const ins = 0.02 + off, y = 0.06 + off;
+  const wa = wallSpot(a1, room, ins), wb = wallSpot(b1, room, ins);
+  return [ea.pos, a1, V(a1.x, floor, a1.z), V(wa.x, floor, wa.z), V(wa.x, y, wa.z), ...perimeter(wa.t, wb.t, room, ins, y),
+    V(wb.x, y, wb.z), V(wb.x, floor, wb.z), V(b1.x, floor, b1.z), b1, eb.pos];
+}
+/** Nearest point on the room walls (inset), with its distance t along the perimeter. */
+function wallSpot(p, room, ins) {
+  const { w, d } = room;
+  const x = Math.min(w - ins, Math.max(ins, p.x)), z = Math.min(d - ins, Math.max(ins, p.z));
+  const dist = [p.z, w - p.x, d - p.z, p.x]; // walls z=0, x=w, z=d, x=0
+  const k = dist.indexOf(Math.min(...dist));
+  if (k === 0) return { x, z: ins, t: x };
+  if (k === 1) return { x: w - ins, z, t: w + z };
+  if (k === 2) return { x, z: d - ins, t: w + d + (w - x) };
+  return { x: ins, z, t: 2 * w + d + (d - z) };
+}
+/** Room corners passed when walking the perimeter the short way from ta to tb. */
+function perimeter(ta, tb, room, ins, y) {
+  const { w, d } = room, P = 2 * (w + d);
+  const fwd = (tb - ta + P) % P, len = Math.min(fwd, P - fwd), forward = fwd <= P - fwd;
+  const out = [];
+  for (const [t, x, z] of [[0, ins, ins], [w, w - ins, ins], [w + d, w - ins, d - ins], [2 * w + d, ins, d - ins]]) {
+    const dt = forward ? (t - ta + P) % P : (ta - t + P) % P;
+    if (dt > 1e-6 && dt < len - 1e-6) out.push([dt, V(x, y, z)]);
+  }
+  return out.sort((a, b) => a[0] - b[0]).map(e => e[1]);
+}
+function polyPath(pts) {
+  const path = new THREE.CurvePath();
+  for (let i = 1; i < pts.length; i++) if (pts[i].distanceToSquared(pts[i - 1]) > 1e-8) path.add(new THREE.LineCurve3(pts[i - 1], pts[i]));
+  return path.curves.length ? path : null;
 }
 
 /** [major line, minor line, room floor fill] from the grid colour setting. */

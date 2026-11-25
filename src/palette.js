@@ -21,6 +21,7 @@ const ICONS = {
   cloud: '<path d="M7 18a4 4 0 0 1 0-8 6 6 0 0 1 11.5 1.5A3.5 3.5 0 0 1 18 18z"/>',
   vm: '<rect x="5" y="5" width="14" height="14" rx="1" stroke-dasharray="3 2"/>',
   cylinder: '<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12c0 1.4 3 2.5 7 2.5s7-1.1 7-2.5V6"/>',
+  screen: '<rect x="3" y="4" width="18" height="12" rx="1"/><path d="M9 20h6M12 16v4"/>',
   rack: '<rect x="5" y="2" width="14" height="20" rx="1"/><path d="M8 6h8M8 9h8M8 12h8M8 15h8"/>',
   desk: '<path d="M3 9h18M5 9v10M19 9v10"/>',
   shelf: '<path d="M5 3v18M19 3v18M5 7h14M5 12h14M5 17h14"/>',
@@ -87,13 +88,20 @@ export class Palette {
     try {
       const data = JSON.parse(await readFileText(f));
       const list = Array.isArray(data) ? data : (data.templates || [data]);
-      let n = 0;
+      let n = 0, upd = 0;
+      const lib = this.app.library;
       for (const t of list) {
-        if (!t || !t.name || !t.shape) continue;
-        t.id = 'cus_' + uid('t').slice(2);
-        this.app.library.custom.push(t); n++;
+        if (!t || typeof t !== 'object' || !t.name || !t.shape) continue;
+        if (typeof t.color !== 'string') delete t.color;
+        t.dims = { w: +t.dims?.w || 0.3, h: +t.dims?.h || 0.1, d: +t.dims?.d || 0.3 };
+        // keep the id, so devices in a shared lab find their template (and its 3D model)
+        const i = typeof t.id === 'string' && t.id.startsWith('cus_') ? lib.custom.findIndex(x => x.id === t.id) : -1;
+        if (i >= 0) { lib.custom[i] = t; forgetModel(t.id); upd++; continue; }
+        if (typeof t.id !== 'string' || !t.id.startsWith('cus_') || lib.get(t.id)) t.id = 'cus_' + uid('t').slice(2);
+        lib.custom.push(t); n++;
       }
-      await this.app.saveLibrary(); this.render(); toast(`Imported ${n} template(s)`, 'ok');
+      await this.app.saveLibrary(); this.render(); this.app.viewport.rebuildAll();
+      toast(`Imported ${n} template(s)${upd ? `, updated ${upd}` : ''}`, 'ok');
     } catch (e) { toast('Import failed: ' + e.message, 'err'); }
   }
   exportTemplates() {
@@ -118,10 +126,12 @@ export class Palette {
 
     const canvas = h('canvas', { width: 300, height: 200, class: 'preview' });
     let pv = null;
+    const ptpl = {}; // preview-only model key: never shares the cache of a saved template
     const redraw = () => {
       t.ports = expandPorts(t.portRows);
       const d = createDevice({ ...t, id: t.id || 'preview' });
-      try { pv ? pv.draw(d, t) : (pv = Viewport.preview(canvas, d, t)); } catch (e) { /* preview optional */ }
+      ptpl.modelData = t.modelData;
+      try { pv ? pv.draw(d, ptpl) : (pv = Viewport.preview(canvas, d, ptpl)); } catch (e) { /* preview optional */ }
       portSummary.textContent = `${t.ports.length} port(s): ` + t.ports.slice(0, 12).map(p => p.name).join(', ') + (t.ports.length > 12 ? '…' : '');
     };
     const portSummary = h('div', { class: 'muted small' });
@@ -183,10 +193,10 @@ export class Palette {
           h('button', { class: 'btn small', onclick: async () => {
             const f = await pickFile('.glb,.gltf'); if (!f) return;
             if (f.size > 8 * 1024 * 1024) toast('Large model: this may slow down saving and old PCs.', 'warn', 4000);
-            t.modelData = await readFileDataURL(f); if (t.id) forgetModel(t.id);
+            t.modelData = await readFileDataURL(f); forgetModel(ptpl);
             modelInfo.textContent = `3D model loaded (${Math.round(f.size / 1024)} KB)`; redraw();
           } }, 'Import .glb model'),
-          h('button', { class: 'btn small', onclick: () => { delete t.modelData; if (t.id) forgetModel(t.id); modelInfo.textContent = 'Using the built-in shape.'; redraw(); } }, 'Remove model')),
+          h('button', { class: 'btn small', onclick: () => { delete t.modelData; forgetModel(ptpl); modelInfo.textContent = 'Using the built-in shape.'; redraw(); } }, 'Remove model')),
         modelInfo,
         h('p', { class: 'muted small' }, 'A .glb model is scaled to fit the width, height and depth. Use a single-file .glb (not .gltf with separate files). Keep it low-poly for older PCs.'),
         !isNew ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', id: 'applyExisting' }), 'Also update shape, size and colour of devices already placed from this template') : null));

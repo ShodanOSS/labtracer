@@ -3,18 +3,22 @@ import { h, clear, uid, parseCIDR, intToIp, ipToInt, download, pickFile, readFil
 import { PORT_KINDS, MEDIA } from './templates.js';
 import {
   devById, portById, linkById, linksOfPort, otherEnd, endLabel, makePort, isRack, isFurniture, rackOccupancy, rackFits,
-  rackFirstFree, deviceRoomId, LINKABLE, MULTI_LINK, portIsFree,
+  rackFirstFree, deviceRoomId, LINKABLE, MULTI_LINK, portIsFree, wifiClients, NON_IP, portFamily,
 } from './model.js';
 import { routeTable, l3Ifaces, duplicateIps, ping } from './netsim.js';
 import { runningConfig } from './cli.js';
 import { lineDiff } from './diff.js';
 import { modal, toast, confirmBox, promptText, popup } from './dialogs.js';
-import { MEDIUM_COLORS } from './viewport.js';
+import { MEDIUM_COLORS, CABLE_ROUTES } from './viewport.js';
 import { monitorConf, monitorHost, deviceChecks, sparkline } from './monitor.js';
+import { SSH_DEFAULTS, sshConf } from './sshterm.js';
 
 const TABS = [['general', 'General'], ['physical', 'Physical'], ['ports', 'Ports'], ['routing', 'Routing'], ['services', 'Services'], ['files', 'Configs'], ['console', 'Console'], ['monitor', 'Monitor']];
+const ROOM_TABS = TABS.slice(0, 2); // racks, desks, shelves: no ports, configs or console
 const ap = (el, ...k) => { el.append(...k.flat(Infinity).filter(x => x !== null && x !== undefined && x !== false)); return el; };
 const VIRTUAL_KINDS = new Set(['svi', 'sub', 'loop', 'tunnel']);
+const DASHED_MEDIA = new Set(['wireless', 'tunnel', 'virtual']);
+const SECURITY = [['wpa2', 'WPA2-PSK'], ['wpa3', 'WPA3-SAE'], ['wpa2/3', 'WPA2/WPA3'], ['802.1x', 'WPA2/3 Enterprise'], ['open', 'Open']];
 
 export class Inspector {
   constructor(el, app) {
@@ -24,6 +28,7 @@ export class Inspector {
     this.fileSel = new Map();
     this.term = new Map();
     this.hist = new Map();
+    this.conMode = new Map(); // device id -> 'sim' | 'ssh'
   }
 
   // ---------------------------------------------------------------- helpers
@@ -45,7 +50,7 @@ export class Inspector {
     else if (o.type === 'area') el = h('textarea', { class: 'inp' + (o.mono ? ' mono' : ''), rows: o.rows || 3, 'data-k': k, placeholder: o.ph || '', onchange: e => set(e.target.value) }, obj[key] || '');
     else if (o.type === 'number') el = h('input', { class: 'inp', type: 'number', step: o.step || 'any', min: o.min, max: o.max, value: obj[key] ?? '', 'data-k': k, placeholder: o.ph || '', onchange: e => set(e.target.value === '' ? (o.empty ?? 0) : Number(e.target.value)) });
     else if (o.type === 'color') el = h('input', { class: 'inp color', type: 'color', value: obj[key] || '#888888', 'data-k': k, onchange: e => set(e.target.value) });
-    else el = h('input', { class: 'inp' + (o.mono ? ' mono' : ''), value: obj[key] ?? '', 'data-k': k, placeholder: o.ph || '', onchange: e => set(o.trim === false ? e.target.value : e.target.value.trim()) });
+    else el = h('input', { class: 'inp' + (o.mono ? ' mono' : ''), value: obj[key] ?? '', 'data-k': k, placeholder: o.ph || '', list: o.list, onchange: e => set(o.trim === false ? e.target.value : e.target.value.trim()) });
     if (o.title) el.title = o.title;
     if (o.validate && obj[key] && o.validate(obj[key])) el.classList.add('bad');
     if (o.type === 'check') return label ? h('label', { class: 'chk' }, el, label) : el;
@@ -76,21 +81,23 @@ export class Inspector {
       h('div', { class: 'grow' }, h('div', { class: 'title' }, d.name), h('div', { class: 'muted small' }, [d.vendor, d.model].filter(Boolean).join(' ') || (tpl ? tpl.name : d.category))),
       h('button', { class: 'icon-btn', title: 'Duplicate (Ctrl+D)', onclick: () => app.duplicateSelected() }, '⧉'),
       h('button', { class: 'icon-btn danger', title: 'Delete (Del)', onclick: () => app.deleteSelection() }, '🗑'));
-    const tabs = h('div', { class: 'tabs' }, TABS.filter(([t]) => !(t === 'physical' && false)).map(([t, l]) =>
-      h('button', { class: 'tab' + (this.tab === t ? ' on' : ''), onclick: () => { this.tab = t; this.render(); } }, l)));
+    const list = d.physicalOnly ? ROOM_TABS : TABS;
+    const cur = list.some(([t]) => t === this.tab) ? this.tab : 'general'; // keep the chosen tab for other devices
+    const tabs = h('div', { class: 'tabs' }, list.map(([t, l]) =>
+      h('button', { class: 'tab' + (cur === t ? ' on' : ''), onclick: () => { this.tab = t; this.render(); } }, l)));
     const body = h('div', { class: 'insp-body', 'data-scroll': 'body' });
     ap(this.el, head, tabs, body);
-    const f = this['tab_' + this.tab] || this.tab_general;
+    const f = this['tab_' + cur] || this.tab_general;
     f.call(this, d, body);
   }
 
   tab_general(d, el) {
     const S = { dev: d.id };
     ap(el, 
-      this.inp(d, 'name', 'Name / hostname', 'all', { validate: v => v ? '' : 'Name is required' }),
+      this.inp(d, 'name', d.physicalOnly ? 'Name' : 'Name / hostname', 'all', { validate: v => v ? '' : 'Name is required' }),
       h('div', { class: 'row2' }, this.inp(d, 'vendor', 'Vendor', S), this.inp(d, 'model', 'Model', S)),
       h('div', { class: 'row2' }, this.inp(d, 'serial', 'Serial / asset tag', S), this.inp(d, 'color', 'Colour', S, { type: 'color' })),
-      h('div', { class: 'row2' },
+      d.physicalOnly ? null : h('div', { class: 'row2' },
         this.inp(d, 'l2', 'Bridges L2 (switch / bridge)', S, { type: 'check' }),
         this.inp(d, 'l3', 'Routes IP (forwarding)', S, { type: 'check' })),
       h('h4', null, 'Attributes'),
@@ -98,7 +105,7 @@ export class Inspector {
       this.inp(d, 'notes', 'Notes', 'none', { type: 'area', rows: 4, trim: false }),
       h('div', { class: 'btnrow' },
         h('button', { class: 'btn small', onclick: () => this.app.saveDeviceAsTemplate(d) }, 'Save as custom object'),
-        h('button', { class: 'btn small', onclick: () => { this.tab = 'console'; this.render(); } }, 'Open console')),
+        d.physicalOnly ? null : h('button', { class: 'btn small', onclick: () => { this.tab = 'console'; this.render(); } }, 'Open console')),
       h('p', { class: 'muted small' }, `Category: ${d.category} · Template: ${this.app.library.get(d.templateId)?.name || d.templateId + ' (missing)'} · ID ${d.id}`));
   }
 
@@ -144,6 +151,7 @@ export class Inspector {
           this.inp(p, 'rot', 'Rotate °', S, { type: 'number', step: 90 }),
           this.inp(p, 'elev', 'Height m', S, { type: 'number', step: 0.05, after: () => { p.elevAuto = false; } })) : null,
         p.roomId && !isRack(d) && !isFurniture(d) ? this.inp(p, 'elevAuto', 'Sit on furniture automatically when moved', 'none', { type: 'check' }) : null,
+        p.roomId && !isRack(d) && !isFurniture(d) ? this.inp(d, 'wall', 'Mounted on a wall (snaps to the nearest wall)', 'all', { type: 'check', after: v => { if (v) app.snapToWall(d); } }) : null,
         p.roomId ? this.levelButtons(d) : null,
         p.roomId ? h('p', { class: 'muted small' }, 'Tip: drag in the room view. R rotates 90°.') : null);
     }
@@ -201,18 +209,19 @@ export class Inspector {
       const links = linksOfPort(lab, d.id, p.id);
       const open = this.expanded.has(p.id);
       const virtual = VIRTUAL_KINDS.has(p.kind);
-      const showsMode = L2 && LINKABLE.has(p.kind) && !['power', 'console', 'usb', 'tunnel'].includes(p.kind);
+      const showsMode = L2 && LINKABLE.has(p.kind) && !NON_IP.has(p.kind) && p.kind !== 'tunnel';
       const linkCell = links.length
         ? h('button', { class: 'linkchip', title: links.map(l => endLabel(lab, otherEnd(l, d.id, p.id))).join('\n'), onclick: () => app.select({ type: 'link', id: links[0].id }) },
           links.length > 1 ? `${links.length} peers` : endLabel(lab, otherEnd(links[0], d.id, p.id)))
         : h('span', { class: 'muted small' }, LINKABLE.has(p.kind) ? '—' : 'virtual');
       ap(table, h('div', { class: 'prow' + (p.enabled ? '' : ' off') },
         h('button', { class: 'mini', title: 'More', onclick: () => { open ? this.expanded.delete(p.id) : this.expanded.add(p.id); this.render(); } }, open ? '▾' : '▸'),
-        this.inp(p, 'name', null, S, { k: `pn-${p.id}`, title: `${p.kind}${p.speed ? ' · ' + p.speed : ''}${p.desc ? ' · ' + p.desc : ''}` }),
-        ['power', 'console', 'usb'].includes(p.kind) ? h('span', { class: 'muted small' }, p.kind) :
+        this.inp(p, 'name', null, S, { k: `pn-${p.id}`, after: (v, old) => { for (const r of d.routes) if (r.dev === old) r.dev = v; }, title: `${p.kind}${p.speed ? ' · ' + p.speed : ''}${p.ssid ? ' · SSID ' + p.ssid : ''}${p.desc ? ' · ' + p.desc : ''}` }),
+        NON_IP.has(p.kind) ? h('span', { class: 'muted small' }, p.kind) :
           this.inp(p, 'ip', null, 'all', { k: `pi-${p.id}`, ph: 'none', mono: true, validate: v => v && v !== 'dhcp' && !parseCIDR(v) ? `"${v}" is not A.B.C.D/NN` : '' }),
         L2 ? (showsMode ? this.inp(p, 'mode', null, S, { k: `pm-${p.id}`, type: 'select', options: [['access', 'access'], ['trunk', 'trunk'], ['routed', 'routed']] }) : h('span', { class: 'muted small' }, p.kind)) : null,
-        L2 ? (showsMode && p.mode === 'access' ? this.inp(p, 'vlan', null, S, { k: `pv-${p.id}`, type: 'number', min: 1, max: 4094, step: 1, empty: 1 })
+        L2 ? (p.kind === 'wifi' && d.ssids.length ? h('span', { class: 'muted small', title: 'Clients get the VLAN of their SSID (Routing tab)' }, 'per SSID')
+          : showsMode && p.mode === 'access' ? this.inp(p, 'vlan', null, S, { k: `pv-${p.id}`, type: 'number', min: 1, max: 4094, step: 1, empty: 1 })
           : showsMode && p.mode === 'trunk' ? h('button', { class: 'linkchip', title: `native ${p.nativeVlan || 1}, allowed ${p.trunkVlans || 'all'} (click to edit)`, onclick: () => { this.expanded.add(p.id); this.render(); } }, `${p.nativeVlan || 1}/${p.trunkVlans || 'all'}`)
             : (p.kind === 'svi' || p.kind === 'sub') ? h('span', { class: 'muted small' }, `v${p.vlan}`) : h('span')) : null,
         this.inp(p, 'enabled', null, { dev: d.id }, { k: `pe-${p.id}`, type: 'check', title: 'Admin up' }),
@@ -230,16 +239,19 @@ export class Inspector {
           p.kind === 'svi' || p.kind === 'sub' ? h('div', { class: 'row2' },
             this.inp(p, 'vlan', p.kind === 'svi' ? 'VLAN (SVI / bridge)' : '802.1Q tag', 'all', { k: `pvv-${p.id}`, type: 'number', min: 1, max: 4094, step: 1, empty: 1 }),
             p.kind === 'sub' ? this.inp(p, 'parent', 'Parent port', 'all', { k: `ppar-${p.id}`, type: 'select', options: [['', '—'], ...d.ports.filter(x => !VIRTUAL_KINDS.has(x.kind) && x.id !== p.id).map(x => [x.id, x.name])] }) : h('span')) : null,
+          p.kind === 'wifi' && !d.ssids.length ? h('div', { class: 'row2' },
+            this.inp(p, 'ssid', 'Joins SSID', 'all', { k: `pssid-${p.id}`, ph: 'SSID name', list: 'ssid-list' }), h('span')) : null,
           h('div', { class: 'btnrow' },
             links.length ? h('button', { class: 'btn small', onclick: () => { app.lab.links = app.lab.links.filter(l => !links.includes(l)); this.commit('Disconnect', 'all'); } }, 'Disconnect') : null,
             h('button', { class: 'btn small danger', onclick: () => { app.removePortRaw(d, p.id); this.commit('Remove port', 'all'); } }, 'Remove port'))));
       }
     }
     const kindSel = h('select', { class: 'inp', 'data-k': 'newkind' }, PORT_KINDS.map(k => h('option', { value: k }, k)));
-    ap(el, table, h('div', { class: 'btnrow' }, kindSel,
+    const ssidList = h('datalist', { id: 'ssid-list' }, [...new Set(lab.devices.flatMap(x => x.ssids.map(s => s.name)))].map(n => h('option', { value: n })));
+    ap(el, table, ssidList, h('div', { class: 'btnrow' }, kindSel,
       h('button', { class: 'btn small', onclick: () => {
         const kind = kindSel.value;
-        const base = { eth: 'eth', sfp: 'sfp', wifi: 'wlan', vport: 'veth', tunnel: 'wg', svi: 'vlan', sub: 'sub', loop: 'lo', console: 'con', usb: 'usb', power: 'psu' }[kind];
+        const base = { eth: 'eth', sfp: 'sfp', wifi: 'wlan', vport: 'veth', tunnel: 'wg', svi: 'vlan', sub: 'sub', loop: 'lo', console: 'con', usb: 'usb', video: 'hdmi', power: 'psu' }[kind];
         let n = 0; while (d.ports.some(p => p.name === base + n)) n++;
         const np = makePort({ name: base + n, kind, mode: d.l2 ? 'access' : 'routed' });
         if (kind === 'sub') { const par = d.ports.find(x => !VIRTUAL_KINDS.has(x.kind)); np.parent = par?.id || null; np.vlan = 10; np.name = (par?.name || 'eth0') + '.10'; }
@@ -252,7 +264,7 @@ export class Inspector {
 
   tab_routing(d, el) {
     const S = { dev: d.id };
-    const ifNames = [['', '—'], ...d.ports.filter(p => !['power', 'console', 'usb'].includes(p.kind)).map(p => [p.name, p.name])];
+    const ifNames = [['', '—'], ...d.ports.filter(p => !NON_IP.has(p.kind)).map(p => [p.name, p.name])];
     const rt = h('div', { class: 'routes' }, h('div', { class: 'rrow head' }, h('span', null, 'Destination'), h('span', null, 'Next hop'), h('span', null, 'or interface'), h('span')));
     d.routes.forEach((r, i) => ap(rt, h('div', { class: 'rrow' },
       this.inp(r, 'dest', null, 'none', { k: `rd-${i}`, mono: true, ph: '0.0.0.0/0', validate: v => parseCIDR(v) ? '' : 'Destination must be A.B.C.D/NN' }),
@@ -286,6 +298,24 @@ export class Inspector {
         h('button', { class: 'mini', onclick: () => { d.vlans.splice(i, 1); this.commit('Remove VLAN', 'none'); } }, '×'))));
       ap(vl, h('button', { class: 'btn small', onclick: () => { const n = Math.max(1, ...d.vlans.map(v => v.id)) + 1; d.vlans.push({ id: n, name: '' }); this.commit('Add VLAN', 'none'); } }, '+ VLAN'));
       ap(el, h('h4', null, 'VLAN database'), vl);
+    }
+    if (d.l2 && d.ports.some(p => p.kind === 'wifi')) {
+      const clients = wifiClients(this.app.lab, d);
+      const on = s => clients.filter(c => c.port.ssid === s.name);
+      const sl = h('div', { class: 'routes' }, d.ssids.length ? h('div', { class: 'ssrow head' }, h('span', null, 'SSID'), h('span', null, 'VLAN'), h('span', null, 'Security'), h('span', null, 'Clients'), h('span')) : null);
+      d.ssids.forEach((s, i) => ap(sl, h('div', { class: 'ssrow' },
+        this.inp(s, 'name', null, 'all', { k: `ssn-${i}`, ph: 'SSID', after: (v, old) => { for (const c of clients) if (c.port.ssid === old) c.port.ssid = v; } }),
+        this.inp(s, 'vlan', null, 'all', { k: `ssv-${i}`, type: 'number', min: 1, max: 4094, step: 1, empty: 1 }),
+        this.inp(s, 'security', null, 'none', { k: `sss-${i}`, type: 'select', options: SECURITY }),
+        h('span', { class: 'muted small', title: on(s).map(c => c.dev.name).join('\n') }, String(on(s).length)),
+        h('button', { class: 'mini', title: 'Remove SSID', onclick: () => { d.ssids.splice(i, 1); this.commit('Remove SSID', 'all'); } }, '×'))));
+      ap(sl, h('button', { class: 'btn small', onclick: () => {
+        let n = d.ssids.length + 1; while (d.ssids.some(x => x.name === 'ssid' + n)) n++;
+        d.ssids.push({ name: 'ssid' + n, vlan: 1, security: 'wpa2' }); this.commit('Add SSID', 'all');
+      } }, '+ SSID'));
+      ap(el, h('h4', null, 'Wireless SSIDs'), sl, h('p', { class: 'muted small' }, d.ssids.length
+        ? 'All radios broadcast these SSIDs. A client joins one in its wifi port (Ports tab) or on the wireless link, and lands on that VLAN. The uplink must carry the VLAN (trunk).'
+        : 'No SSIDs: wireless clients use the access VLAN of the radio port. Add SSIDs to put clients on different VLANs.'));
     }
   }
 
@@ -372,6 +402,12 @@ export class Inspector {
   // ---------------------------------------------------------------- console
   tab_console(d, el) {
     const app = this.app;
+    const mode = this.conMode.get(d.id) || (app.ssh.isOpen(d.id) ? 'ssh' : 'sim');
+    const setMode = m => { this.conMode.set(d.id, m); this.render(); };
+    ap(el, h('div', { class: 'seg con-mode' },
+      h('button', { class: 'tb' + (mode === 'sim' ? ' on' : ''), title: 'IOS-style commands that edit the model', onclick: () => setMode('sim') }, 'Simulated'),
+      h('button', { class: 'tb' + (mode === 'ssh' ? ' on' : ''), title: 'A real SSH session to the device', onclick: () => setMode('ssh') }, 'SSH' + (app.ssh.isOpen(d.id) ? ' ●' : ''))));
+    if (mode === 'ssh') return this.sshConsole(d, el);
     if (!this.term.has(d.id)) this.term.set(d.id, [{ c: 'muted', s: `${d.name} console. Type ? for help. Changes apply to the model at once.` }]);
     const buf = this.term.get(d.id);
     const hist = this.hist.get(d.id) || []; this.hist.set(d.id, hist);
@@ -399,6 +435,31 @@ export class Inspector {
       outEl, h('div', { class: 'term-line' }, h('span', { class: 'prompt' }, app.cli.prompt(d)), input));
     ap(el, termBox);
     setTimeout(() => { if (!document.activeElement || document.activeElement === document.body) input.focus(); }, 0);
+  }
+
+  sshConsole(d, el) {
+    const app = this.app, ssh = app.ssh;
+    if (!d.ssh) d.ssh = { ...SSH_DEFAULTS }; // saved with the next change; holds no secrets
+    Object.assign(d.ssh, { ...SSH_DEFAULTS, ...d.ssh });
+    const c = sshConf(d), S = { dev: d.id };
+    const def = app.settings.sshEngine || 'paramiko';
+    const form = h('details', { class: 'ssh-form', open: ssh.isOpen(d.id) ? null : true },
+      h('summary', null, `${c.user ? c.user + '@' : ''}${c.host || monitorHost(d) || '(no host)'}:${c.port || 22} · ${ssh.engineOf(d)}${c.auth === 'password' ? ' · password' : ''}${c.legacy ? ' · legacy' : ''}`),
+      h('div', { class: 'row2' },
+        this.inp(d.ssh, 'host', 'Host', S, { k: 'ssh-host', mono: true, ph: monitorHost(d) || 'IP address or DNS name', hint: 'Empty = the monitor address / first IP.' }),
+        this.inp(d.ssh, 'port', 'Port', S, { k: 'ssh-port', type: 'number', min: 1, max: 65535, step: 1, empty: 22 })),
+      h('div', { class: 'row2' },
+        this.inp(d.ssh, 'user', 'User', S, { k: 'ssh-user', mono: true, ph: 'your local user name' }),
+        this.inp(d.ssh, 'engine', 'Engine', S, { k: 'ssh-engine', type: 'select', options: [['', `Default (${def})`], ['paramiko', 'paramiko'], ['system', 'System ssh (OpenSSH)']] })),
+      this.inp(d.ssh, 'keyFile', 'Key file (optional)', S, { k: 'ssh-key', mono: true, ph: '~/.ssh/id_ed25519', hint: 'A path on this PC. Empty = ssh-agent and the default keys in ~/.ssh.' }),
+      this.inp(d.ssh, 'auth', 'Login', S, { k: 'ssh-auth', type: 'select', options: [['key', 'Key / ssh-agent (recommended)'], ['password', 'Password (not recommended)']] }),
+      c.auth === 'password' ? h('div', { class: 'warn small' }, 'Password login is not recommended. Use it only for legacy devices without key-based login. LabTracer never stores the password: paramiko asks for it in a dialog, System ssh asks in the terminal.') : null,
+      this.inp(d.ssh, 'legacy', 'Allow legacy algorithms (ssh-rsa, SHA-1 key exchange, CBC ciphers) for old devices', S, { type: 'check', k: 'ssh-legacy' }),
+      c.legacy && ssh.engineOf(d) === 'paramiko' && ssh.caps && ssh.caps.paramiko && !ssh.caps.paramikoLegacy
+        ? h('div', { class: 'warn small' }, `paramiko ${ssh.caps.paramikoVersion} has no legacy algorithms. Select the System ssh engine for this device.`) : null);
+    const miss = ssh.missing(d);
+    ap(el, form, miss ? h('div', { class: 'warn small' }, miss) : null, ssh.view(d));
+    if (!ssh.caps && ssh.available) ssh.loadCaps().then(x => { if (x && ssh.missing(d)) this.render(); });
   }
 
   // ---------------------------------------------------------------- monitor
@@ -440,12 +501,12 @@ export class Inspector {
     const pa = portById(da, l.a.port), pb = portById(db, l.b.port);
     const endSel = (end, dev, other) => {
       const curPort = portById(dev, end.port);
-      const fits = (d, p) => portIsFree(lab, d, p) && ((p.kind === 'power') === (curPort?.kind === 'power'));
+      const fits = (d, p) => portIsFree(lab, d, p) && portFamily(p) === portFamily(curPort);
       const devOpts = lab.devices.filter(x => !x.physicalOnly && x.id !== other.dev).sort((a, b) => a.name.localeCompare(b.name));
       const moveTo = id => {
         const nd = devById(lab, id);
         const free = nd.ports.find(p => fits(nd, p));
-        if (!free) { toast(`${nd.name} has no free ${curPort?.kind === 'power' ? 'power ' : ''}port. Add one in its Ports tab, then try again.`, 'err', 4000); this.render(); return; }
+        if (!free) { toast(`${nd.name} has no free ${portFamily(curPort) === 'data' ? '' : curPort.kind + ' '}port. Add one in its Ports tab, then try again.`, 'err', 4000); this.render(); return; }
         const from = dev.name;
         end.dev = nd.id; end.port = free.id;
         this.commit(`Move cable from ${from} to ${nd.name}`, 'all');
@@ -471,12 +532,26 @@ export class Inspector {
       h('div', { class: 'insp-body' },
         this.inp(l, 'medium', 'Medium', 'all', { type: 'select', options: MEDIA.filter(m => m[0] !== 'auto') }),
         this.inp(l, 'label', 'Label', 'all', { ph: 'e.g. trunk, DMZ, LACP-1' }),
+        this.ssidPicker(da, pa, db, pb),
+        DASHED_MEDIA.has(l.medium) ? null : h('div', { class: 'row2' },
+          this.inp(l, 'route', 'Cable route (room view)', 'all', { type: 'select', options: [['', 'Lab default'], ...CABLE_ROUTES] }),
+          h('label', { class: 'fld' }, h('span', null, 'Length'), h('span', { class: 'mono small' }, (len => len ? `≈ ${len.toFixed(1)} m as drawn` : 'open the room view')(app.viewport.cableLength(l.id))))),
         h('div', { class: 'row2' }, this.inp(l, 'color', 'Colour override', 'all', { type: 'color' }),
           h('label', { class: 'fld' }, h('span', null, ' '), h('button', { class: 'btn small', onclick: () => { delete l.color; this.commit('Reset colour', 'all'); } }, 'Use medium colour'))),
         h('p', { class: 'muted small' }, 'To move this cable, change the device or port on either end. The other end stays plugged in.'),
         h('h4', null, 'End A'), endSel(l.a, da, l.b),
         h('h4', null, 'End B'), endSel(l.b, db, l.a),
         this.inp(l, 'notes', 'Notes (cable ID, length, patch path…)', 'none', { type: 'area', rows: 3, trim: false })));
+  }
+
+  /** Wireless link between an AP with SSIDs and a client: pick the client's SSID here. */
+  ssidPicker(da, pa, db, pb) {
+    if (pa?.kind !== 'wifi' || pb?.kind !== 'wifi') return null;
+    const [apDev, client] = da.ssids.length ? [da, pb] : (db.ssids.length ? [db, pa] : []);
+    if (!apDev) return null;
+    const opts = [['', '— not joined —'], ...apDev.ssids.map(s => [s.name, `${s.name} (VLAN ${s.vlan || 1})`])];
+    if (client.ssid && !apDev.ssids.some(s => s.name === client.ssid)) opts.push([client.ssid, `${client.ssid} (not on ${apDev.name})`]);
+    return this.inp(client, 'ssid', `SSID on ${apDev.name}`, 'all', { type: 'select', options: opts });
   }
 
   monitorSection() {
@@ -536,7 +611,9 @@ export class Inspector {
           lab.rooms.splice(i, 1); if (app.roomId === r.id) app.roomId = lab.rooms[0]?.id || null; this.commit('Delete room', 'all');
         } }, '×')))));
     ap(rooms, h('button', { class: 'btn small', onclick: () => { lab.rooms.push({ id: uid('room'), name: `Room ${lab.rooms.length + 1}`, w: 4, d: 3, h: 2.4 }); this.commit('Add room', 'all'); } }, '+ Room'));
-    ap(body, this.inp(lab, 'notes', 'Lab notes', 'none', { type: 'area', rows: 3, trim: false }), h('h4', null, 'Rooms'), rooms);
+    ap(body, this.inp(lab, 'notes', 'Lab notes', 'none', { type: 'area', rows: 3, trim: false }), h('h4', null, 'Rooms'), rooms,
+      this.inp(lab, 'cableRoute', 'Cable routing in the room view', 'all', { type: 'select', options: CABLE_ROUTES,
+        hint: 'A link can override this. Cables inside one rack and leads under 0.5 m always hang.' }));
 
     // monitoring
     ap(body, h('h4', null, 'Monitoring agent'), this.monitorSection());

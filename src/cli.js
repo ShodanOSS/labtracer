@@ -1,10 +1,9 @@
 // IOS-flavoured command line for any device. Commands edit the same
 // device model that the properties panel edits.
 import { parseCIDR, intToIp, prefixToMask, maskToPrefix, ipToInt, uid } from './util.js';
-import { makePort, portByName, portById, linksOfPort, otherEnd, devById, L3_KINDS } from './model.js';
+import { makePort, portByName, portById, linksOfPort, otherEnd, devById, L3_KINDS, ssidVlan, wifiClients, NON_IP } from './model.js';
 import { routeTable, ping, trace } from './netsim.js';
 
-const NON_IP = new Set(['power', 'console', 'usb']);
 
 export function maskOf(cidr) { const c = parseCIDR(cidr); return c ? intToIp(prefixToMask(c.prefix)) : ''; }
 
@@ -17,6 +16,7 @@ export function runningConfig(lab, dev) {
   L.push('!', `hostname ${dev.name}`, '!');
   if (dev.l3) L.push('ip routing', '!');
   for (const v of [...dev.vlans].sort((a, b) => a.id - b.id)) { L.push(`vlan ${v.id}`); if (v.name) L.push(` name ${v.name}`); L.push('!'); }
+  for (const s of dev.ssids || []) L.push(`wlan ssid ${s.name}`, ` vlan ${s.vlan || 1}`, ` security ${s.security || 'wpa2'}`, '!');
   for (const p of dev.ports) {
     if (NON_IP.has(p.kind) && !p.desc) continue;
     L.push(`interface ${p.name}`);
@@ -26,6 +26,7 @@ export function runningConfig(lab, dev) {
     if (p.kind === 'tunnel') L.push(' ! tunnel interface');
     if (p.speed && !NON_IP.has(p.kind)) L.push(` speed ${p.speed}`);
     if (p.mac) L.push(` mac-address ${p.mac}`);
+    if (p.kind === 'wifi' && p.ssid) L.push(` ssid ${p.ssid}`);
     if (!NON_IP.has(p.kind)) {
       if (isSw(p)) {
         if (p.mode === 'trunk') {
@@ -101,6 +102,7 @@ export class Cli {
       if (is(a, 'ip', 2) && is(b, 'route', 2)) { out(this.routes(dev)); return res; }
       if (is(a, 'route', 2)) { out(this.routes(dev)); return res; }
       if (is(a, 'vlan', 2)) { out(this.vlans(dev)); return res; }
+      if (is(a, 'wlan', 2) || is(a, 'ssid', 2)) { out(this.wlan(lab, dev)); return res; }
       if (is(a, 'cdp', 2) || is(a, 'lldp', 2) || is(a, 'neighbors', 3)) { out(this.neighbors(lab, dev)); return res; }
       if (is(a, 'services', 3)) { out(dev.services.length ? dev.services.map(x => `${pad(x.name, 22)} ${pad(x.port || '', 8)} ${x.enabled === false ? 'disabled' : 'enabled'}  ${x.notes || ''}`).join('\n') : 'No services defined.'); return res; }
       if (is(a, 'attributes', 2) || is(a, 'inventory', 3) || is(a, 'version', 3)) {
@@ -181,6 +183,7 @@ export class Cli {
         err('usage: switchport mode access|trunk | switchport access vlan N | switchport trunk native vlan N | switchport trunk allowed vlan LIST');
         return res;
       }
+      if (is(c0, 'ssid', 2) && cur.kind === 'wifi' && !dev.ssids?.length) { cur.ssid = neg ? '' : args.join(' '); res.changed = true; return res; }
       if (is(c0, 'vlan', 2) && (cur.kind === 'svi' || cur.kind === 'sub')) { cur.vlan = parseInt(args[0], 10) || 1; res.changed = true; return res; }
     }
 
@@ -202,7 +205,7 @@ export class Cli {
         else if (/^(lo|loopback)\d*$/i.test(name)) p = makePort({ name, kind: 'loop' });
         else if (/^(wg|tun|tunnel|oet|ipsec)\d*$/i.test(name)) p = makePort({ name, kind: 'tunnel' });
         else if (/^(br|bridge)\d*$/i.test(name)) p = makePort({ name, kind: 'svi', vlan: 1 });
-        else p = makePort({ name, kind: 'eth' });
+        else { err(`No interface ${name}. Add physical ports in the Ports tab (here: vlanN, NAME.N, loN, wgN, brN).`); return res; }
         dev.ports.push(p);
         out(`% Created ${p.kind} interface ${p.name}`);
         res.changed = true;
@@ -226,6 +229,25 @@ export class Cli {
       res.changed = true; return res;
     }
 
+    if (is(c0, 'wlan', 2) && is(lw(0), 'ssid', 2)) {
+      // wlan ssid NAME [vlan N] [security X]   (NAME may contain spaces)
+      const rest = args.slice(1);
+      const iv = rest.findIndex(x => /^(vlan|security)$/i.test(x));
+      const name = (iv < 0 ? rest : rest.slice(0, iv)).join(' ');
+      if (!name) { err('usage: wlan ssid NAME [vlan N] [security wpa2|wpa3|wpa2/3|802.1x|open]'); return res; }
+      dev.ssids ||= [];
+      if (neg) { dev.ssids = dev.ssids.filter(s => s.name !== name); res.changed = true; return res; }
+      if (!dev.l2 || !dev.ports.some(p => p.kind === 'wifi')) { err('This device needs a wifi port and "Bridges L2" to broadcast SSIDs'); return res; }
+      let s = dev.ssids.find(x => x.name === name);
+      if (!s) { s = { name, vlan: 1, security: 'wpa2' }; dev.ssids.push(s); }
+      for (let i = iv; i >= 0 && i < rest.length; i += 2) {
+        const k = rest[i].toLowerCase(), v = rest[i + 1];
+        if (k === 'vlan') { const n = parseInt(v, 10); if (!(n >= 1 && n <= 4094)) { err('VLAN id 1-4094'); return res; } s.vlan = n; }
+        else if (k === 'security') s.security = (v || 'wpa2').toLowerCase();
+        else { err(`Unknown option ${rest[i]}`); return res; }
+      }
+      res.changed = true; return res;
+    }
     if (is(c0, 'ip', 2) && is(lw(0), 'routing', 3)) { dev.l3 = !neg; res.changed = true; return res; }
     if (is(c0, 'ip', 2) && is(lw(0), 'default-gateway', 3)) {
       dev.routes = dev.routes.filter(r => r.dest !== '0.0.0.0/0');
@@ -303,6 +325,18 @@ export class Cli {
     if (trunks.length) rows.push('', 'Trunks: ' + trunks.map(p => `${p.name} (native ${p.nativeVlan || 1}, allowed ${p.trunkVlans || 'all'})`).join('; '));
     return rows.join('\n');
   }
+  wlan(lab, dev) {
+    if (!dev.ssids?.length) {
+      const w = dev.ports.filter(p => p.kind === 'wifi');
+      return w.length ? w.map(p => `${p.name}: ${p.ssid ? 'joined SSID ' + p.ssid : 'no SSID'}`).join('\n') : '% No wireless interfaces.';
+    }
+    const cl = wifiClients(lab, dev);
+    const rows = [pad('SSID', 22) + pad('VLAN', 6) + pad('Security', 12) + 'Clients',
+      ...dev.ssids.map(s => pad(s.name, 22) + pad(s.vlan || 1, 6) + pad(s.security || 'wpa2', 12) + (cl.filter(c => c.port.ssid === s.name).map(c => c.dev.name).join(', ') || '-'))];
+    const lost = cl.filter(c => ssidVlan(dev, c.port.ssid) === null);
+    if (lost.length) rows.push('', 'Not associated: ' + lost.map(c => `${c.dev.name} (${c.port.ssid || 'no SSID'})`).join(', '));
+    return rows.join('\n');
+  }
   neighbors(lab, dev) {
     const rows = [pad('Local', 12) + pad('Neighbor', 20) + pad('Remote', 12) + 'Medium'];
     for (const l of lab.links) {
@@ -317,7 +351,7 @@ export class Cli {
 
 const HELP = `Exec:
   show running-config | startup-config | interfaces | ip interface brief
-  show ip route | vlan | neighbors | services | inventory
+  show ip route | vlan | wlan | neighbors | services | inventory
   ping A.B.C.D        traceroute A.B.C.D
   write memory        (saves a startup-config snapshot)
   clear  configure terminal  end  exit
@@ -329,6 +363,7 @@ Global config:
   ip route DEST MASK NEXTHOP|IFACE   (or DEST/NN)
   ip default-gateway A.B.C.D
   ip routing | no ip routing
+  wlan ssid NAME [vlan N] [security wpa2|wpa3|open]   (access point)
   service NAME [PORT] | no service NAME
   set ATTRIBUTE VALUE | no set ATTRIBUTE
 Interface config:
@@ -339,4 +374,5 @@ Interface config:
   switchport trunk native vlan N
   switchport trunk allowed vlan 10,20-30|all
   encapsulation dot1q N   speed X   mac-address X
+  ssid NAME | no ssid          (wifi client: join an SSID)
 Abbreviations work: sh run, sh ip int br, int, conf t, no sh, wr`;
