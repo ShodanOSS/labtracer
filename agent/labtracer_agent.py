@@ -118,7 +118,12 @@ def _ping_binary(host: str, timeout: float):
     m = re.search(rb"time[=<]\s*([\d.]+)\s*ms", r.stdout)
     if m:
         ms = float(m.group(1))
-    return r.returncode == 0, (ms if r.returncode == 0 else None), "" if r.returncode == 0 else "no reply"
+    ok = r.returncode == 0
+    if ok and os.name == "nt" and ":" not in host and b"TTL=" not in r.stdout.upper():
+        # Windows ping exits 0 on "Destination host unreachable" from a router.
+        # A real IPv4 echo reply always has TTL= (IPv6 replies have none).
+        return False, None, "unreachable"
+    return ok, (ms if ok else None), "" if ok else "no reply"
 
 
 def check_ping(host: str, timeout: float):
@@ -408,7 +413,9 @@ def main():
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(cfg["tls_cert"], cfg["tls_key"])
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        # No handshake in accept(): a silent client would block the server.
+        # Handler.setup() does it on the worker thread, with Handler.timeout.
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
         scheme = "https"
     threading.Thread(target=agent.loop, daemon=True).start()
     print(f"labtracer-agent {VERSION} on {scheme}://{cfg['bind']}:{cfg['port']}  "

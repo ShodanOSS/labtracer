@@ -60,6 +60,14 @@ def safe_name(name: str, fallback: str = "untitled") -> str:
     return name[:80] or fallback
 
 
+def lab_version(path: Path) -> str:
+    """Version of a lab file for save conflict checks: its mtime in ns, or "new"."""
+    try:
+        return str(path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        return "new"
+
+
 def atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -141,9 +149,11 @@ class Handler(SimpleHTTPRequestHandler):
     def _write_ok(self) -> bool:
         return self.headers.get("X-LabTracer") == "1"
 
-    def _json(self, obj, status=HTTPStatus.OK):
+    def _json(self, obj, status=HTTPStatus.OK, headers=None):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -182,9 +192,11 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/labs/"):
             name = safe_name(unquote(path[len("/api/labs/"):]))
             f = LAB_DIR / f"{name}.json"
-            if not f.exists():
-                return self._error(HTTPStatus.NOT_FOUND, "no such lab")
-            return self._json(json.loads(f.read_text("utf-8")))
+            with _lock:  # file and version must match
+                if not f.exists():
+                    return self._error(HTTPStatus.NOT_FOUND, "no such lab")
+                version, doc = lab_version(f), json.loads(f.read_text("utf-8"))
+            return self._json(doc, headers={"X-LabTracer-Version": version})
         if path == "/api/library":
             if LIBRARY_FILE.exists():
                 return self._json(json.loads(LIBRARY_FILE.read_text("utf-8")))
@@ -243,10 +255,20 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(data, dict) or "devices" not in data:
                 return self._error(HTTPStatus.BAD_REQUEST, "not a lab document")
             target = LAB_DIR / f"{name}.json"
+            # X-LabTracer-Base: the version the page loaded ("new" = expects no file).
+            # A different version on disk means another window saved first: refuse.
+            # X-LabTracer-Force: 1 overwrites anyway and always keeps a history copy.
+            base = self.headers.get("X-LabTracer-Base")
+            force = self.headers.get("X-LabTracer-Force") == "1"
             with _lock:
-                rotate_history(name, target)
+                current = lab_version(target)
+                if base is not None and not force and base != current:
+                    return self._json({"error": "the lab was changed by another window", "conflict": True,
+                                       "version": current}, HTTPStatus.CONFLICT)
+                rotate_history(name, target, force=force)
                 atomic_write(target, json.dumps(data, indent=1).encode("utf-8"))
-            return self._json({"ok": True, "name": name, "saved": int(time.time())})
+                version = lab_version(target)
+            return self._json({"ok": True, "name": name, "saved": int(time.time()), "version": version})
         if path == "/api/monitor/config":
             if not isinstance(data, dict):
                 return self._error(HTTPStatus.BAD_REQUEST, "bad config")

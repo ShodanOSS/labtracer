@@ -12,6 +12,7 @@ It has:
 - A simple network simulator for `ping` and `traceroute`.
 - Config files for each device, with dated snapshots, diff and restore.
 - Custom objects. You can make a new device type and import a `.glb` 3D model for it.
+- An inventory table with status, asset tag, purchase date, supplier, cost and warranty, and CSV import and export.
 
 All data stays on your computer. The app does not connect to the internet. The SSH console connects only to the devices that you select.
 
@@ -22,7 +23,7 @@ All data stays on your computer. The app does not connect to the internet. The S
 - Optional, for the SSH console: `pip install paramiko`. For the System ssh engine on Windows: `pip install pywinpty`.
 - Node.js is NOT necessary to run the app. It is necessary only to rebuild `app/app.js` from `src/`.
 
-Target hardware: an 8th generation Intel Core i5 with 8 GB RAM and integrated graphics. The server uses approximately 20 MB of RAM. The browser tab uses approximately 200 to 300 MB (measured: 280 MB with software rendering, 6 MB of it JavaScript heap). The app does not draw frames when idle.
+Target hardware: an 8th generation Intel Core i5 with 8 GB RAM and integrated graphics. The server uses approximately 35 MB of RAM, and approximately 50 MB after you first open an SSH console (paramiko loads then). The browser tab uses approximately 200 to 300 MB (measured: 280 MB with software rendering, 6 MB of it JavaScript heap). The app does not draw frames when idle.
 
 ## Start the app
 
@@ -63,6 +64,10 @@ You can open `app/index.html` directly in the browser. In this mode, the app kee
 | `data/monitor.json` | Agent address and token. Do not put this file in git. |
 | `data/ssh/known_hosts` | Host keys that you trusted in the SSH console (paramiko engine). |
 
+If the same lab is open in two browser windows or tabs, a window cannot silently overwrite the other window's saved changes. Autosave stops in the window with the older version, and Ctrl+S asks which version to keep. If you replace the other version, a copy of it goes into `data/labs/.history/`.
+
+Undo and redo history lives only in the browser tab. It is not saved, and it is gone when you reload the page or stop the server.
+
 The `.gitignore` keeps the `data` folder out of git. Your labs, custom objects, exported configs and the agent token stay on your computer.
 
 The lab files are JSON. You can keep them in git. Do not put secrets in the lab notes or config files.
@@ -75,6 +80,7 @@ On the first start, the app makes an example lab called `example-lab`. All names
 
 - Topology view (key 1): the logical network. Device positions are free.
 - Room view (key 2): the physical layout. Dimensions are in metres.
+- Inventory (key 3): a table of all items. Refer to [Inventory](#inventory).
 
 Mouse controls:
 
@@ -162,11 +168,65 @@ All radios of the access point broadcast all its SSIDs. The topology view shows 
 
 If an access point has no SSIDs, its clients use the access VLAN of the radio port (older labs work this way).
 
+## Inventory
+
+Click "Inventory" in the toolbar, or push 3. The inventory shows all items of the lab in a table.
+
+- Click a column name to sort. Click it again to reverse the order.
+- Type in the search box to find items by name, serial, asset tag, address, MAC, location, notes or attributes.
+- Use the lists to show one status, one category or one room. "Not in a room" shows items that have no room.
+- Click a row to edit the item in the panel on the right. Double-click a row to show the item in the 3D view.
+- The line above the table shows the number of items in each status, the total cost and the warranties that ended or end within 90 days. Click a number to show only those items.
+- Columns that are empty for all items shown (for example Serial) are not shown.
+
+### Status
+
+Set the status in the Inventory section of the General tab.
+
+| Status | Drawn in the 3D views | Checked by the agent |
+|---|---|---|
+| In service | Yes | Yes |
+| Faulty / in repair | Yes | Yes |
+| Spare | No | No |
+| On order | No | No |
+| Retired | No | No |
+
+To show spare, on-order and retired items in the 3D views, open File > Settings and select "Show spare, on-order and retired items in the 3D views". The links of an item that is not drawn are not drawn either.
+
+Use "Storage location" for items that are not in a room or a rack, for example "garage shelf, box 3".
+
+### Add items
+
+- Click "+ Add item". Select the type, the name and the status.
+- Or, in the inventory, click a type in the left panel. The item is added immediately.
+- For spare parts, cables, drives and other items that are not network devices, use the "Parts" group. These items have no ports and are not in the topology view.
+
+### Import from a CSV file
+
+1. Click "Import CSV…" (or File > Import inventory).
+2. Select the file. The first row must have the column names. Comma, semicolon and tab separators are accepted.
+3. Examine the preview. It shows the number of new and updated items and a warning for each value that LabTracer did not accept.
+4. Click "Import". Push Ctrl+Z to undo the import.
+
+Rules:
+
+- A row updates the item with the same name. If the name is empty, it updates the item with the same serial. Clear "Update items that already exist" to add only new items.
+- An empty cell does not change the value that is already there.
+- LabTracer finds the columns by their names. For example, "Hostname", "Manufacturer", "Serial Number", "Price" and "Warranty Expires" are accepted. A column with an unknown name becomes an attribute.
+- Dates must be year first: `2024-03-05` or `2024/3/5`. LabTracer does not guess the order of `05/03/2024`; it shows a warning.
+- Costs can have a currency symbol and thousands separators: `$1,234.50` and `1.234,50 €` are both 1234.50.
+- Status words such as "in use", "broken", "stock", "on order" and "decommissioned" are accepted.
+- "addresses" takes `eth0=192.168.1.10/24 eth1=…` or a single address. "services" takes `ssh:22; https:443`.
+- "room", "rack" and "U" place the item. A new item with a rack becomes 1U rack equipment. If the U is not free, the item goes into the first free U.
+- A new item gets its type from the "template" column, a custom object with the same model, or the category. Other items become a generic part.
+
+File > Export inventory (.csv) exports all items, in the same format. "Export CSV" in the inventory exports only the items that the table shows. You can edit the file in a spreadsheet and import it again.
+
 ## Device properties
 
 | Tab | Contents |
 |---|---|
-| General | Name, vendor, model, serial, colour, attributes, notes. "Bridges L2" makes the device a switch or bridge. "Routes IP" makes it a router. |
+| General | Name, vendor, model, serial, colour, inventory fields, attributes, notes. "Bridges L2" makes the device a switch or bridge. "Routes IP" makes it a router. |
 | Physical | Room, position, height, rotation, rack and U position, size. |
 | Ports | Name, IP address (`A.B.C.D/NN`), switchport mode, VLAN, admin state, link. Click the arrow for more fields. |
 | Routing | Static routes, live routing table, ping test, VLAN database. |
@@ -343,7 +403,7 @@ Use small, low-poly `.glb` files (less than 1 MB if possible). Large models make
 | R, Shift+R | Turn 90 degrees (room view) |
 | F | Fit the view |
 | T | Top-down view |
-| 1, 2 | Topology view, room view |
+| 1, 2, 3 | Topology view, room view, inventory |
 | Ctrl+Z, Ctrl+Y | Undo, redo |
 | Ctrl+S | Save |
 | Ctrl+O | Open a lab |
@@ -431,6 +491,7 @@ Do this only if you change files in `src/`.
 | `src/sample.js` | Example lab (placeholder names and addresses). |
 | `src/store.js` | Storage (server or browser). |
 | `src/monitor.js` | Live status from the check agent. |
+| `src/inventory.js` | Inventory table, CSV import and export. |
 | `src/sshterm.js` | SSH console in the browser (xterm.js). |
 | `agent/` | The check agent, its systemd unit and its instructions. |
 

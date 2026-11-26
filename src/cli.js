@@ -1,7 +1,7 @@
 // IOS-flavoured command line for any device. Commands edit the same
 // device model that the properties panel edits.
 import { parseCIDR, intToIp, prefixToMask, maskToPrefix, ipToInt, uid } from './util.js';
-import { makePort, portByName, portById, linksOfPort, otherEnd, devById, L3_KINDS, ssidVlan, wifiClients, NON_IP } from './model.js';
+import { makePort, portByName, portById, linksOfPort, otherEnd, devById, L3_KINDS, ssidVlan, wifiClients, NON_IP, statusLabel } from './model.js';
 import { routeTable, ping, trace } from './netsim.js';
 
 
@@ -106,7 +106,11 @@ export class Cli {
       if (is(a, 'cdp', 2) || is(a, 'lldp', 2) || is(a, 'neighbors', 3)) { out(this.neighbors(lab, dev)); return res; }
       if (is(a, 'services', 3)) { out(dev.services.length ? dev.services.map(x => `${pad(x.name, 22)} ${pad(x.port || '', 8)} ${x.enabled === false ? 'disabled' : 'enabled'}  ${x.notes || ''}`).join('\n') : 'No services defined.'); return res; }
       if (is(a, 'attributes', 2) || is(a, 'inventory', 3) || is(a, 'version', 3)) {
+        const inv = dev.inv || {};
         out([`${dev.name}  ${dev.vendor} ${dev.model}`.trim(), dev.serial ? `Serial: ${dev.serial}` : null,
+          `Status: ${statusLabel(inv.status)}`, inv.assetTag ? `Asset tag: ${inv.assetTag}` : null,
+          inv.location ? `Location: ${inv.location}` : null, inv.purchased ? `Purchased: ${inv.purchased}${inv.supplier ? ' from ' + inv.supplier : ''}` : null,
+          inv.cost !== '' && inv.cost != null ? `Cost: ${inv.cost}` : null, inv.warranty ? `Warranty until: ${inv.warranty}` : null,
           ...dev.attrs.filter(x => x.k).map(x => `${x.k}: ${x.v}`)].filter(Boolean).join('\n') || 'No attributes.'); return res;
       }
       err('Unknown show command. Try: show running-config | interfaces | ip interface brief | ip route | vlan | neighbors | services | inventory');

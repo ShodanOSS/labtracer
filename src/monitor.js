@@ -2,6 +2,7 @@
 // LabTracer sends the agent a target list built from the lab, then polls
 // its results through server.py (the page itself never talks to the agent).
 import { parseCIDR } from './util.js';
+import { isDeployed } from './model.js';
 import { toast } from './dialogs.js';
 
 const HDR = { 'Content-Type': 'application/json', 'X-LabTracer': '1' };
@@ -27,7 +28,7 @@ export function tcpPorts(spec) {
 }
 export function deviceChecks(d) {
   const c = monitorConf(d), host = monitorHost(d);
-  if (!c.enabled || !host) return [];
+  if (!c.enabled || !host || !isDeployed(d)) return []; // spares and retired kit are not checked
   const checks = [];
   if (c.ping) checks.push({ type: 'ping', host });
   if (c.services) for (const s of d.services) if (s.enabled !== false) for (const port of tcpPorts(s.port)) checks.push({ type: 'tcp', host, port, label: s.name });
@@ -69,7 +70,11 @@ export class Monitor {
   schedulePush() {
     if (!this.live) return;
     clearTimeout(this.pushTimer);
-    this.pushTimer = setTimeout(() => this.push(true).then(() => setTimeout(() => this.poll(), 1500)).catch(e => this.fail(e)), 2500);
+    this.pushTimer = setTimeout(() => {
+      this.pushTimer = null;
+      if (!this.live) return;
+      this.push(true).then(() => setTimeout(() => { if (this.live) this.poll(); }, 1500)).catch(e => this.fail(e));
+    }, 2500);
   }
   async poll() {
     try {
@@ -94,7 +99,12 @@ export class Monitor {
     this.timer = setInterval(() => this.poll(), every);
     return true;
   }
-  stop() { this.live = false; clearInterval(this.timer); this.timer = null; this.status = null; this.app.onMonitorStatus(); }
+  stop() {
+    this.live = false;
+    clearInterval(this.timer); this.timer = null;
+    clearTimeout(this.pushTimer); this.pushTimer = null; // no target push after stop
+    this.status = null; this.app.onMonitorStatus();
+  }
 
   /** devId -> state, with staleness applied */
   states() {

@@ -33,10 +33,23 @@ import threading
 import time
 from pathlib import Path
 
-try:  # optional
-    import paramiko  # type: ignore
-except Exception:  # noqa: BLE001
-    paramiko = None
+paramiko = None  # optional; loaded on first SSH use (it adds ~35 MB to an idle server)
+_pm_lock = threading.Lock()
+_pm_tried = False
+
+
+def load_paramiko():
+    """Import paramiko once, when the SSH console is first used. None if not installed."""
+    global paramiko, _pm_tried
+    with _pm_lock:
+        if not _pm_tried:
+            _pm_tried = True
+            try:
+                import paramiko as _pm  # type: ignore
+                paramiko = _pm
+            except Exception:  # noqa: BLE001
+                paramiko = None
+    return paramiko
 
 ENABLED = True  # server.py turns this off for a non-loopback bind
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -113,6 +126,7 @@ def known_hosts_files():
 
 
 def caps():
+    load_paramiko()
     pty_ok, pty_hint = pty_support()
     return {
         "enabled": ENABLED,
@@ -135,7 +149,8 @@ def caps():
 def validate(p):
     if not isinstance(p, dict):
         raise ValueError("bad request")
-    host = str(p.get("host") or "").strip()
+    load_paramiko()
+    host =str(p.get("host") or "").strip()
     if not host or host.startswith("-") or not HOST_RE.match(host):
         raise ValueError("host must be an IP address or a DNS name")
     user = str(p.get("user") or "").strip()

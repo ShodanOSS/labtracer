@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import { buildModel, disposeTree, topoScale, portLayout, portAnchor, RACK_U } from './models3d.js';
-import { devById, portById, linkedPortIds, showsInTopology, showsInRoom, deviceRoomId, isRack, isFurniture } from './model.js';
+import { devById, portById, linkedPortIds, showsInTopology, showsInRoom, deviceRoomId, isRack, isFurniture, isDeployed } from './model.js';
 import { parseCIDR } from './util.js';
 
 export const MEDIUM_COLORS = {
@@ -33,7 +33,9 @@ export class Viewport {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
     this.labels = new CSS2DRenderer();
-    Object.assign(this.labels.domElement.style, { position: 'absolute', inset: '0', pointerEvents: 'none' });
+    // zIndex 1: its own stacking context, so the per-label z-indexes of CSS2DRenderer stay inside it
+    Object.assign(this.labels.domElement.style, { position: 'absolute', inset: '0', pointerEvents: 'none', zIndex: '1' });
+    this.labels.domElement.classList.add('lbl-layer');
     container.appendChild(this.labels.domElement);
 
     this.scene = new THREE.Scene();
@@ -95,6 +97,7 @@ export class Viewport {
   }
 
   visible(d) {
+    if (!isDeployed(d) && !this.app.settings.showStored) return false; // spare, on order, retired: inventory only
     if (this.mode === 'topo') return showsInTopology(d);
     return showsInRoom(d) && deviceRoomId(this.app.lab, d) === this.app.roomId;
   }

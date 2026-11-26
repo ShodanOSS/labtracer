@@ -178,7 +178,13 @@ export const BUILTIN = [
     dims: { w: 1.5, h: 0.75, d: 0.75 }, levels: [0.75], color: '#8b6b4a', ports: [] },
   { id: 'inf-shelf', name: 'Wire shelving unit', category: 'Infrastructure', shape: 'shelf', face: 'plain', physicalOnly: true,
     dims: { w: 0.9, h: 1.8, d: 0.45 }, levels: [0.15, 0.6, 1.05, 1.5], color: '#a7adb5', ports: [] },
+
+  // ---------------------------------------------------------------- Parts (inventory items that are not network devices)
+  { id: 'part-item', name: 'Generic item / part', category: 'Parts', shape: 'box', face: 'plain', physicalOnly: true,
+    dims: { w: 0.25, h: 0.08, d: 0.2 }, color: '#6b7480', ports: [] },
+  { id: 'part-drive', name: 'Drive (HDD / SSD)', category: 'Parts', shape: 'box', face: 'plain', physicalOnly: true,
+    dims: { w: 0.102, h: 0.026, d: 0.147 }, color: '#8a9099', ports: [] },
 ];
 
-export const CATEGORY_ORDER = ['Network', 'Compute', 'Storage', 'Virtual', 'Endpoints', 'IoT', 'Power', 'WAN', 'Infrastructure'];
+export const CATEGORY_ORDER = ['Network', 'Compute', 'Storage', 'Virtual', 'Endpoints', 'IoT', 'Power', 'WAN', 'Infrastructure', 'Parts'];
 export const RACK_U = U;

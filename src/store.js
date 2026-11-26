@@ -4,11 +4,19 @@
 const HDR = { 'Content-Type': 'application/json', 'X-LabTracer': '1' };
 const LS = 'labtracer.';
 
-async function j(r) { if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch { /* ignore */ } throw new Error(m); } return r.json(); }
+async function j(r) {
+  if (!r.ok) {
+    let m = r.statusText;
+    try { m = (await r.json()).error || m; } catch { /* ignore */ }
+    const e = new Error(m); e.conflict = r.status === 409; throw e;
+  }
+  return r.json();
+}
 
 export const store = {
   mode: 'local',
   dataPath: '',
+  versions: {}, // lab name -> version on disk when this page last loaded or saved it (server mode)
   async init() {
     if (location.protocol.startsWith('http')) {
       try {
@@ -28,19 +36,35 @@ export const store = {
     return out.sort((a, b) => a.name.localeCompare(b.name));
   },
   async loadLab(name) {
-    if (this.mode === 'server') return j(await fetch('/api/labs/' + encodeURIComponent(name), { cache: 'no-store' }));
+    if (this.mode === 'server') {
+      const r = await fetch('/api/labs/' + encodeURIComponent(name), { cache: 'no-store' });
+      const lab = await j(r);
+      this.versions[name] = r.headers.get('X-LabTracer-Version') || 'new';
+      return lab;
+    }
     const s = localStorage.getItem(LS + 'lab.' + name);
     if (!s) throw new Error('no such lab');
     return JSON.parse(s);
   },
-  async saveLab(name, lab) {
+  /** force: overwrite even if another window saved this lab since we loaded it. */
+  async saveLab(name, lab, { force = false } = {}) {
     const body = JSON.stringify(lab);
-    if (this.mode === 'server') return j(await fetch('/api/labs/' + encodeURIComponent(name), { method: 'PUT', headers: HDR, body }));
+    if (this.mode === 'server') {
+      const headers = { ...HDR, 'X-LabTracer-Base': this.versions[name] || 'new' };
+      if (force) headers['X-LabTracer-Force'] = '1';
+      const res = await j(await fetch('/api/labs/' + encodeURIComponent(name), { method: 'PUT', headers, body }));
+      if (res.version) this.versions[name] = res.version;
+      return res;
+    }
     try { localStorage.setItem(LS + 'lab.' + name, body); } catch (e) { throw new Error('Browser storage is full. Export the lab to a file.'); }
     return { ok: true };
   },
   async deleteLab(name) {
-    if (this.mode === 'server') return j(await fetch('/api/delete/' + encodeURIComponent(name), { method: 'POST', headers: HDR, body: '{}' }));
+    if (this.mode === 'server') {
+      const res = await j(await fetch('/api/delete/' + encodeURIComponent(name), { method: 'POST', headers: HDR, body: '{}' }));
+      delete this.versions[name];
+      return res;
+    }
     localStorage.removeItem(LS + 'lab.' + name); return { ok: true };
   },
   async loadLibrary() {

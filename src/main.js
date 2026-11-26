@@ -4,7 +4,9 @@ import { store, makeTar } from './store.js';
 import {
   Library, newLab, normalizeLab, createDevice, devById, portById, linksOfPort, portIsFree, removeDevice, removePort, portFamily,
   duplicateDevice, uniqueName, makePort, isRack, isFurniture, deviceRoomId, rackFirstFree, LINKABLE, MULTI_LINK,
+  isDeployed, showsInTopology, showsInRoom,
 } from './model.js';
+import { InventoryView, exportInventoryCsv, inventoryItems } from './inventory.js';
 import { Viewport } from './viewport.js';
 import { Palette, compressPorts } from './palette.js';
 import { Inspector } from './inspector.js';
@@ -18,7 +20,7 @@ import { SshManager } from './sshterm.js';
 const DEFAULT_SETTINGS = {
   antialias: true, pixelCap: 1.25, labels: true, portLabels: true, cables: true, powerLinks: true,
   rackLabels: false, snap: true, autosave: true, lockLayout: false, portAnchors: true, gridColor: '#2b4a35', bgColor: '#0c130e',
-  sshEngine: 'paramiko',
+  sshEngine: 'paramiko', showStored: false,
 };
 
 const UNDO_CHARS = 24e6; // cap undo memory (~50 MB) for big labs with config snapshots
@@ -40,6 +42,8 @@ class App {
     this.snap = null;
     this.dirty = false;
     this.roomId = null;
+    this.inventoryOn = false;   // inventory table shown instead of the 3D view
+    this.viewportStale = false; // lab changed while the 3D view was hidden
   }
 
   async init() {
@@ -51,6 +55,9 @@ class App {
     this.cli = new Cli(this);
     this.monitor = new Monitor(this);
     this.ssh = new SshManager(this);
+    const invEl = h('div', { class: 'inv', hidden: true });
+    document.getElementById('viewport').appendChild(invEl);
+    this.inventory = new InventoryView(invEl, this);
     await this.monitor.loadConfig();
     this.bindToolbar();
     this.bindKeys();
@@ -63,7 +70,7 @@ class App {
     if (pick) await this.openLab(pick.name);
     else { this.loadLab(buildSampleLab(), 'example-lab'); await this.save(true); toast('Created an example lab. Edit it, or start a new one from File > New lab.', 'info', 5000); }
 
-    setInterval(() => { if (this.dirty && this.settings.autosave && store.mode === 'server') this.save(true); }, 30000);
+    setInterval(() => { if (this.dirty && !this.conflict && this.settings.autosave && store.mode === 'server') this.save(true); }, 30000);
     window.addEventListener('beforeunload', e => { if (this.dirty) { e.preventDefault(); e.returnValue = ''; } });
     this.updateStatus();
     document.getElementById('mode-badge').textContent = store.mode === 'server' ? 'Saved to disk' : 'Browser storage';
@@ -81,12 +88,15 @@ class App {
     this.undoStack = []; this.redoStack = [];
     this.snap = JSON.stringify(this.lab);
     this.dirty = false;
+    this.conflict = false;
     this.cancelTools();
     this.viewport.camState = {};
-    this.viewport.mode = this.lab.view.mode === 'room' ? 'room' : 'topo';
+    this.viewport.mode = (this.lab.view.mode3d || this.lab.view.mode) === 'room' ? 'room' : 'topo';
+    this.inventoryOn = this.lab.view.mode === 'inventory';
     this.syncModeButtons();
-    this.viewport.rebuildAll();
+    this.viewport.rebuildAll(); this.viewportStale = false;
     this.viewport.fit();
+    this.inventory.show(this.inventoryOn);
     this.inspector.render();
     this.renderRoomSelect();
     store.setPref('lastLab', this.labName);
@@ -99,17 +109,44 @@ class App {
     try { this.loadLab(await store.loadLab(name), name); }
     catch (e) { toast(`Could not open ${name}: ${e.message}`, 'err'); }
   }
-  async save(quiet = false) {
+  /** Saves run one after another, so autosave and Ctrl+S never send the same base version twice.
+   *  opts.force: overwrite a lab that another window saved after this one loaded it. */
+  save(quiet = false, opts = {}) {
+    const run = () => this.doSave(quiet, opts);
+    this.saveChain = (this.saveChain || Promise.resolve()).then(run, run);
+    return this.saveChain;
+  }
+  async doSave(quiet, { force = false } = {}) {
     if (!this.lab) return;
     const ae = document.activeElement;
     if (!quiet && ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName) && !ae.classList.contains('term-in')) ae.dispatchEvent(new Event('change'));
     try {
-      this.lab.view.mode = this.viewport.mode; this.lab.view.roomId = this.roomId;
+      this.lab.view.mode = this.inventoryOn ? 'inventory' : this.viewport.mode;
+      this.lab.view.mode3d = this.viewport.mode; this.lab.view.roomId = this.roomId;
       const snap = this.snap, name = this.labName;
-      await store.saveLab(name, this.lab);
-      if (this.snap === snap && this.labName === name) this.dirty = false; this.lastSaved = Date.now(); this.updateStatus();
+      await store.saveLab(name, this.lab, { force });
+      if (this.snap === snap && this.labName === name) this.dirty = false;
+      this.conflict = false; this.lastSaved = Date.now(); this.updateStatus();
       if (!quiet) toast(store.mode === 'server' ? `Saved ${this.labName}` : `Saved ${this.labName} in this browser`, 'ok');
-    } catch (e) { toast('Save failed: ' + e.message, 'err', 5000); }
+    } catch (e) {
+      if (e.conflict) this.onSaveConflict(quiet); // not awaited: it may call save() again
+      else toast('Save failed: ' + e.message, 'err', 5000);
+    }
+  }
+  /** Another window or tab saved this lab after this window loaded it. */
+  async onSaveConflict(quiet) {
+    const first = !this.conflict;
+    this.conflict = true; this.updateStatus();
+    if (quiet) { // autosave: stop and tell once; the next Ctrl+S asks what to keep
+      if (first) toast(`Autosave paused: another window saved "${this.labName}". Press Ctrl+S to choose which version to keep.`, 'warn', 9000);
+      return;
+    }
+    const name = this.labName;
+    if (await confirmBox('Lab changed in another window',
+      `Another window or tab saved "${name}" after this window opened it. Replace that version with the version in this window? The other version stays in data/labs/.history.`,
+      'Replace', true)) {
+      if (this.labName === name) this.save(false, { force: true });
+    } else toast('Not saved. To keep both, use File > Save as… here. To get the other version, open the lab again (File > Open lab).', 'info', 9000);
   }
   async labExists(name) {
     try { return (await store.listLabs()).some(l => l.name === name); } catch { return false; }
@@ -143,11 +180,13 @@ class App {
     this.redoStack = [];
     this.snap = now;
     this.dirty = true;
-    if (scope === 'all') this.viewport.rebuildAll();
+    if (this.inventoryOn) this.viewportStale = scope !== 'none' || this.viewportStale; // rebuild when the 3D view comes back
+    else if (scope === 'all') this.viewport.rebuildAll();
     else if (scope === 'links') this.viewport.refreshLinks();
     else if (scope && scope.dev) this.viewport.refreshDevice(scope.dev);
     if (this.selection && !this.selectionExists()) this.selection = null;
     this.ssh.prune(); // close sessions of deleted devices
+    if (this.inventoryOn) this.inventory.render();
     this.inspector.render();
     this.renderRoomSelect();
     this.updateStatus(label);
@@ -172,14 +211,16 @@ class App {
     if (!this.selectionExists()) this.selection = null;
     if (!this.lab.rooms.some(r => r.id === this.roomId)) this.roomId = this.lab.rooms[0]?.id || null;
     this.ssh.prune();
-    this.viewport.rebuildAll(); this.inspector.render(); this.renderRoomSelect(); this.updateStatus();
+    if (this.inventoryOn) { this.viewportStale = true; this.inventory.render(); } else this.viewport.rebuildAll();
+    this.inspector.render(); this.renderRoomSelect(); this.updateStatus();
+    if (this.monitor?.live) this.monitor.schedulePush();
   }
 
   // ---------------------------------------------------------------- selection and tools
   select(sel) {
     this.selection = sel;
     this.viewport.setSelection(sel);
-    if (sel && sel.type === 'device' && this.inspector.tab === 'physical') { /* keep tab */ }
+    if (this.inventoryOn) this.inventory.renderBody();
     this.inspector.render();
   }
   setTool(tool) {
@@ -197,6 +238,7 @@ class App {
     if (!keep) { this.tool = 'select'; if (this.viewport) this.viewport.tool = 'select'; document.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === 'select')); }
   }
   startPlacing(tid) {
+    if (this.inventoryOn) { this.addItem(tid); return; } // no 3D view to click in: add it straight away
     if (this.placingTpl === tid) { this.setTool('select'); return; }
     this.setTool('place');
     this.placingTpl = tid;
@@ -227,6 +269,37 @@ class App {
     this.selection = { type: 'device', id: d.id };
     this.commit('Add ' + d.name, 'all');
     if (!this.placeMulti) this.setTool('select');
+  }
+  /** Inventory: add an item that is not placed anywhere yet. */
+  addItem(tid, { name = '', status = 'active' } = {}) {
+    const tpl = this.library.get(tid); if (!tpl || tpl.logical) return null;
+    const lab = this.lab;
+    const d = createDevice(tpl, { name: uniqueName(lab, name || defaultName(tpl)) });
+    d.inv.status = status;
+    const xs = lab.devices.filter(showsInTopology); // logical position: below the others
+    d.topo.x = xs.length ? Math.round(xs.reduce((a, x) => a + x.topo.x, 0) / xs.length) : 0;
+    d.topo.z = xs.length ? Math.max(...xs.map(x => x.topo.z)) + 2 : 0;
+    lab.devices.push(d);
+    this.selection = { type: 'device', id: d.id };
+    this.commit('Add ' + d.name, 'all');
+    this.inspector.tab = 'general'; this.inspector.render();
+    return d;
+  }
+  /** Inventory double-click: show the item in the 3D view it is drawn in. */
+  showInView(d) {
+    if (!isDeployed(d) && !this.settings.showStored) {
+      toast(`${d.name} is ${d.inv.status === 'ordered' ? 'on order' : d.inv.status}, so it is not drawn. Change its status, or turn on File > Settings > "Show spare, on-order and retired items".`, 'info', 6000);
+      return;
+    }
+    const rid = showsInRoom(d) ? deviceRoomId(this.lab, d) : null;
+    if (!showsInTopology(d) && !rid) { toast(`${d.name} is not in a room yet. Set its room in the Physical tab.`, 'info', 4000); return; }
+    this.selection = { type: 'device', id: d.id };
+    if (rid && (!showsInTopology(d) || this.viewport.mode === 'room')) {
+      if (rid !== this.roomId) { this.roomId = rid; this.lab.view.roomId = rid; this.renderRoomSelect(); this.viewportStale = true; }
+      this.setMode('room');
+    } else this.setMode('topo');
+    this.viewport.setSelection(this.selection);
+    this.inspector.render();
   }
   placeInRoom(d) {
     const r = this.currentRoom(); if (!r) return;
@@ -379,16 +452,27 @@ class App {
   }
 
   // ---------------------------------------------------------------- views
+  /** mode: 'topo' | 'room' (3D views) | 'inventory' (table; the 3D view keeps its own mode underneath). */
   setMode(mode) {
-    if (mode === this.viewport.mode) return;
+    const inv = mode === 'inventory';
+    if (inv ? this.inventoryOn : (!this.inventoryOn && mode === this.viewport.mode)) return;
     this.cancelTools();
-    this.viewport.setMode(mode);
+    this.inventoryOn = inv;
+    this.inventory.show(inv);
+    if (!inv) {
+      if (mode !== this.viewport.mode) this.viewport.setMode(mode); // rebuilds
+      else if (this.viewportStale) this.viewport.rebuildAll();
+      else this.viewport.requestRender();
+      this.viewportStale = false;
+    }
     this.lab.view.mode = mode;
     this.syncModeButtons();
     this.updateStatus();
   }
   syncModeButtons() {
-    document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === this.viewport.mode));
+    const cur = this.inventoryOn ? 'inventory' : this.viewport.mode;
+    document.body.classList.toggle('inv-mode', this.inventoryOn);
+    document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === cur));
     document.getElementById('room-select').style.display = this.viewport.mode === 'room' ? '' : 'none';
     document.getElementById('tg-cables').style.display = this.viewport.mode === 'room' ? '' : 'none';
     document.getElementById('tg-ports').style.display = this.viewport.mode === 'topo' ? '' : 'none';
@@ -463,7 +547,8 @@ class App {
       { label: 'Import lab (.json)…', onClick: () => this.importLab() },
       { label: 'Export lab (.json)', onClick: () => download(`${this.labName}.labtracer.json`, JSON.stringify(this.lab, null, 1), 'application/json') },
       { label: 'Export all configs', sub: store.mode === 'server' ? 'to data/export/' : '.tar download', onClick: () => this.exportConfigs(this.lab.devices) },
-      { label: 'Export inventory (.csv)', onClick: () => this.exportCsv() },
+      { label: 'Export inventory (.csv)', sub: 'all items', onClick: () => exportInventoryCsv(this.lab, inventoryItems(this.lab), `${this.labName}-inventory.csv`) },
+      { label: 'Import inventory (.csv)…', sub: 'add or update items', onClick: () => this.inventory.importCsv() },
       '-',
       { label: 'Load example lab…', onClick: async () => {
         if (!await this.confirmDiscard()) return;
@@ -480,7 +565,7 @@ class App {
     if (!await this.confirmDiscard()) return;
     const name = await promptText('New lab', 'Lab name', await this.freeLabName('new-lab'), 'Create'); if (!name) return;
     if (!await this.confirmOverwrite(safeName(name))) return;
-    this.loadLab(newLab(safeName(name)), name); await this.save(true);
+    this.loadLab(newLab(safeName(name)), name); await this.save(true, { force: true }); // replace was confirmed
   }
   async openDialog() {
     let labs = [];
@@ -494,10 +579,10 @@ class App {
   async saveAs() {
     const name = await promptText('Save as', 'New lab name', await this.freeLabName(this.labName + '-copy'), 'Save'); if (!name) return;
     if (safeName(name) !== this.labName && !await this.confirmOverwrite(safeName(name))) return;
-    this.labName = safeName(name); this.lab.name = this.labName;
+    this.labName = safeName(name); this.lab.name = this.labName; this.conflict = false;
     document.getElementById('lab-name').textContent = this.labName;
     store.setPref('lastLab', this.labName);
-    await this.save();
+    await this.save(false, { force: true }); // the name is free, or replacing it was confirmed
   }
   async importLab() {
     if (!await this.confirmDiscard()) return;
@@ -533,15 +618,6 @@ class App {
     } catch (e) { toast('Export failed: ' + e.message, 'err'); return; }
     download(`${this.labName}-configs.tar`, makeTar(files.map(f => ({ path: `${this.labName}/${safeName(f.device)}/${safeName(f.name)}`, content: f.content }))));
   }
-  exportCsv() {
-    const rows = [['name', 'category', 'vendor', 'model', 'serial', 'room', 'rack', 'U', 'addresses', 'notes']];
-    for (const d of this.lab.devices) {
-      const room = this.lab.rooms.find(r => r.id === deviceRoomId(this.lab, d))?.name || '';
-      const rack = d.phys.mount === 'rack' ? devById(this.lab, d.phys.rackId)?.name || '' : '';
-      rows.push([d.name, d.category, d.vendor, d.model, d.serial, room, rack, d.phys.rackU || '', d.ports.filter(p => p.ip).map(p => `${p.name}=${p.ip}`).join(' '), d.notes]);
-    }
-    download(`${this.labName}-inventory.csv`, rows.map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n'), 'text/csv');
-  }
   settingsDialog() {
     const s = this.settings;
     const chk = (k, label, hint) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: s[k], onchange: e => { s[k] = e.target.checked; this.applySettings(); } }), label, hint ? h('small', { class: 'muted' }, ' ' + hint) : null);
@@ -560,6 +636,7 @@ class App {
           h('button', { class: 'btn small', onclick: e => { s.bgColor = DEFAULT_SETTINGS.bgColor; e.target.previousSibling.value = s.bgColor; this.applyColors(); } }, 'Reset')))),
       chk('labels', 'Device labels'), chk('portLabels', 'Port names on links (topology)'), chk('powerLinks', 'Power links (topology)'),
       chk('cables', 'Cables (room)'), chk('portAnchors', 'Cables plug into their real port position', 'off = cables meet at the device centre'), chk('rackLabels', 'Labels for rack-mounted devices (room)'),
+      chk('showStored', 'Show spare, on-order and retired items in the 3D views', 'off = they are only in the inventory'),
       h('h4', null, 'Editing'),
       chk('snap', 'Snap to grid'), chk('lockLayout', 'Lock layout (no dragging)'),
       chk('autosave', 'Autosave every 30 s', store.mode === 'server' ? '' : '(server mode only)'),
@@ -585,7 +662,7 @@ class App {
   helpDialog() {
     const rows = [['V', 'Select / move tool'], ['L', 'Link tool (click device, pick port, click second device)'], ['Esc', 'Cancel tool or close popup'],
       ['Del / Backspace', 'Delete selection'], ['Ctrl+D', 'Duplicate device'], ['R / Shift+R', 'Rotate in room view'], ['F', 'Fit view'], ['T', 'Top-down view'],
-      ['1 / 2', 'Topology / room view'], ['Ctrl+Z / Ctrl+Y', 'Undo / redo'], ['Ctrl+S', 'Save'], ['Double-click', 'Open device console'],
+      ['1 / 2 / 3', 'Topology / room view / inventory'], ['Ctrl+Z / Ctrl+Y', 'Undo / redo'], ['Ctrl+S', 'Save'], ['Double-click', 'Open device console'],
       ['Left drag', 'Orbit (or move a device)'], ['Right drag', 'Pan'], ['Wheel', 'Zoom']];
     modal('Keyboard and mouse', h('div', null,
       h('table', { class: 'keys' }, rows.map(([k, v]) => h('tr', null, h('td', null, h('kbd', null, k)), h('td', null, v)))),
@@ -626,6 +703,7 @@ class App {
       if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); this.redo(); return; }
       if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); this.duplicateSelected(); return; }
       if (mod) return;
+      if (this.inventoryOn && 'vVlLfFtTrR'.includes(e.key)) return; // 3D tools do nothing in the table
       switch (e.key) {
         case 'Escape': if (this.tool !== 'select' || this.linkStart) this.setTool('select'); else this.select(null); break;
         case 'Delete': case 'Backspace': e.preventDefault(); this.deleteSelection(); break;
@@ -637,6 +715,7 @@ class App {
         case 'R': this.rotateSelected(-90); break;
         case '1': this.setMode('topo'); break;
         case '2': this.setMode('room'); break;
+        case '3': this.setMode('inventory'); break;
         case '?': this.helpDialog(); break;
       }
     });
@@ -646,10 +725,11 @@ class App {
     let hint = '';
     if (this.tool === 'place') hint = `Placing ${this.library.get(this.placingTpl)?.name || ''}: click on the floor. Esc to stop.`;
     else if (this.tool === 'link') hint = this.linkStart ? 'Click the second device.' : 'Link tool: click the first device. Esc to stop.';
+    else if (this.inventoryOn) hint = 'Inventory · click a row to edit it on the right · double-click to show it in 3D · click a column name to sort';
     else hint = this.viewport?.mode === 'room' ? 'Room view · drag to move · R rotates · racks: select one, see Physical tab' : 'Topology view · drag to move · double-click for console';
     if (st) st.textContent = hint;
     const sr = document.getElementById('status-right');
-    if (sr && this.lab) sr.textContent = `${this.dirty ? '● unsaved' : (this.lastSaved ? 'saved ' + new Date(this.lastSaved).toLocaleTimeString() : 'saved')}${msg ? ' · ' + msg : ''}`;
+    if (sr && this.lab) sr.textContent = `${this.conflict ? '⚠ not saved: changed in another window · ' : ''}${this.dirty ? '● unsaved' :(this.lastSaved ? 'saved ' + new Date(this.lastSaved).toLocaleTimeString() : 'saved')}${msg ? ' · ' + msg : ''}`;
     document.getElementById('btn-save')?.classList.toggle('dirty', !!this.dirty);
   }
 }
@@ -666,7 +746,7 @@ function autoMedium(a, b) {
   return 'copper';
 }
 function defaultName(t) {
-  const m = { Network: 'net', Compute: 'host', Storage: 'nas', Virtual: 'vm', Endpoints: 'client', IoT: 'iot', Power: 'ups', WAN: 'wan', Infrastructure: t.shape };
+  const m = { Network: 'net', Compute: 'host', Storage: 'nas', Virtual: 'vm', Endpoints: 'client', IoT: 'iot', Power: 'ups', WAN: 'wan', Infrastructure: t.shape, Parts: 'part' };
   if (t.shape === 'rack') return 'Rack';
   if (t.shape === 'desk') return 'Desk';
   if (t.shape === 'shelf') return 'Shelf';

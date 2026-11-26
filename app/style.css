@@ -255,3 +255,39 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 .ssh-term { background: #060a07; border: 1px solid var(--line); border-radius: 6px; padding: 4px; height: calc(100vh - 330px); min-height: 260px; }
 .ssh-term .xterm { height: 100%; }
 .ssh-bar .btn:disabled { opacity: .4; cursor: default; filter: grayscale(.6); }
+
+/* ---------- inventory table */
+.inv-mode .view3d { display: none !important; }
+.inv-mode #room-select, .inv-mode .lbl-layer { display: none !important; }
+.inv { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; background: var(--bg); min-width: 0; }
+.inv[hidden] { display: none; }
+.inv-bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.inv-search { flex: 0 1 300px; min-width: 160px; }
+.inv-filters { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.inv-filters .tb-select { max-width: 230px; }
+.inv-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.inv-sum { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--line); }
+.inv-chip { cursor: pointer; font: inherit; font-size: 11.5px; }
+.inv-scroll { flex: 1; overflow: auto; min-height: 0; }
+.inv-empty { padding: 20px; }
+.inv-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.inv-table th { position: sticky; top: 0; z-index: 1; background: var(--panel); color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  text-align: left; padding: 6px 6px; border-bottom: 1px solid var(--line2); cursor: pointer; white-space: nowrap; user-select: none; }
+.inv-table th:hover, .inv-table th.sorted { color: var(--text); }
+.inv-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.inv-table td.mono { font-family: var(--mono); font-size: 11.5px; }
+.inv-table .num { text-align: right; }
+.inv-table tbody tr { cursor: pointer; }
+.inv-table tbody tr:hover { background: var(--panel2); }
+.inv-table tbody tr.on { background: #1b3d29; }
+.inv-table tbody tr.stored td { color: var(--muted); }
+.swatch.dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 7px; vertical-align: middle; }
+.st { display: inline-block; font-size: 11px; padding: 0 7px; border-radius: 9px; border: 1px solid var(--line2); color: var(--text); }
+.st-active { border-color: #2e7f52; color: var(--ok); }
+.st-faulty { border-color: #7a3030; color: var(--err); }
+.st-spare { border-color: #3c5a78; color: #8ec5ff; }
+.st-ordered { border-color: #5a4a20; color: var(--accent2); }
+.st-retired { color: var(--muted); }
+.inv-table td.w-expired, .inv-chip.w-expired { color: var(--err) !important; }
+.inv-table td.w-soon, .inv-chip.w-soon { color: var(--warn) !important; }
+.inv-warn { margin: 4px 0 0; padding-left: 18px; max-height: 220px; overflow-y: auto; }

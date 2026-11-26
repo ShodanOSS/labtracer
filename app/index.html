@@ -18,24 +18,25 @@
   <div class="seg">
     <button class="tb" data-mode="topo" title="Logical topology (1)">Topology</button>
     <button class="tb" data-mode="room" title="Physical room (2)">Room</button>
+    <button class="tb" data-mode="inventory" title="Inventory table (3)">Inventory</button>
   </div>
   <select id="room-select" class="tb-select" title="Room"></select>
-  <span class="sep"></span>
-  <div class="seg">
+  <span class="sep view3d"></span>
+  <div class="seg view3d">
     <button class="tb on" data-tool="select" title="Select and move (V)">Select</button>
     <button class="tb" data-tool="link" title="Connect devices (L)">Link</button>
   </div>
-  <select id="link-medium" class="tb-select" title="Cable type for new links"></select>
+  <select id="link-medium" class="tb-select view3d" title="Cable type for new links"></select>
   <span class="sep"></span>
   <button id="btn-undo" class="tb" title="Undo (Ctrl+Z)">↶</button>
   <button id="btn-redo" class="tb" title="Redo (Ctrl+Y)">↷</button>
   <span class="sep"></span>
-  <button id="btn-fit" class="tb" title="Fit view (F)">Fit</button>
-  <button id="btn-top" class="tb" title="Top-down (T)">Top</button>
-  <button id="tg-labels" class="tb tg" title="Device labels">Labels</button>
-  <button id="tg-ports" class="tb tg" title="Port names on links">Ports</button>
-  <button id="tg-cables" class="tb tg" title="Cables in room view">Cables</button>
-  <button id="tg-snap" class="tb tg" title="Snap to grid">Snap</button>
+  <button id="btn-fit" class="view3d tb" title="Fit view (F)">Fit</button>
+  <button id="btn-top" class="view3d tb" title="Top-down (T)">Top</button>
+  <button id="tg-labels" class="view3d tb tg" title="Device labels">Labels</button>
+  <button id="tg-ports" class="view3d tb tg" title="Port names on links">Ports</button>
+  <button id="tg-cables" class="view3d tb tg" title="Cables in room view">Cables</button>
+  <button id="tg-snap" class="view3d tb tg" title="Snap to grid">Snap</button>
   <span class="sep"></span>
   <button id="tg-live" class="tb tg live" title="Live status from the check agent">Live</button>
   <span class="grow"></span>

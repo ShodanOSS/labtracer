@@ -4,6 +4,7 @@ import { PORT_KINDS, MEDIA } from './templates.js';
 import {
   devById, portById, linkById, linksOfPort, otherEnd, endLabel, makePort, isRack, isFurniture, rackOccupancy, rackFits,
   rackFirstFree, deviceRoomId, LINKABLE, MULTI_LINK, portIsFree, wifiClients, NON_IP, portFamily,
+  INV_STATUS, isDeployed, warrantyState,
 } from './model.js';
 import { routeTable, l3Ifaces, duplicateIps, ping } from './netsim.js';
 import { runningConfig } from './cli.js';
@@ -49,6 +50,7 @@ export class Inspector {
       o.options.map(([v, l]) => h('option', { value: v, selected: String(v) === String(obj[key] ?? '') ? 'selected' : null }, l)));
     else if (o.type === 'area') el = h('textarea', { class: 'inp' + (o.mono ? ' mono' : ''), rows: o.rows || 3, 'data-k': k, placeholder: o.ph || '', onchange: e => set(e.target.value) }, obj[key] || '');
     else if (o.type === 'number') el = h('input', { class: 'inp', type: 'number', step: o.step || 'any', min: o.min, max: o.max, value: obj[key] ?? '', 'data-k': k, placeholder: o.ph || '', onchange: e => set(e.target.value === '' ? (o.empty ?? 0) : Number(e.target.value)) });
+    else if (o.type === 'date') el = h('input', { class: 'inp', type: 'date', value: obj[key] || '', 'data-k': k, onchange: e => set(e.target.value) });
     else if (o.type === 'color') el = h('input', { class: 'inp color', type: 'color', value: obj[key] || '#888888', 'data-k': k, onchange: e => set(e.target.value) });
     else el = h('input', { class: 'inp' + (o.mono ? ' mono' : ''), value: obj[key] ?? '', 'data-k': k, placeholder: o.ph || '', list: o.list, onchange: e => set(o.trim === false ? e.target.value : e.target.value.trim()) });
     if (o.title) el.title = o.title;
@@ -96,10 +98,11 @@ export class Inspector {
     ap(el, 
       this.inp(d, 'name', d.physicalOnly ? 'Name' : 'Name / hostname', 'all', { validate: v => v ? '' : 'Name is required' }),
       h('div', { class: 'row2' }, this.inp(d, 'vendor', 'Vendor', S), this.inp(d, 'model', 'Model', S)),
-      h('div', { class: 'row2' }, this.inp(d, 'serial', 'Serial / asset tag', S), this.inp(d, 'color', 'Colour', S, { type: 'color' })),
+      h('div', { class: 'row2' }, this.inp(d, 'serial', 'Serial', S), this.inp(d, 'color', 'Colour', S, { type: 'color' })),
       d.physicalOnly ? null : h('div', { class: 'row2' },
         this.inp(d, 'l2', 'Bridges L2 (switch / bridge)', S, { type: 'check' }),
         this.inp(d, 'l3', 'Routes IP (forwarding)', S, { type: 'check' })),
+      this.inventorySection(d),
       h('h4', null, 'Attributes'),
       this.kvTable(d),
       this.inp(d, 'notes', 'Notes', 'none', { type: 'area', rows: 4, trim: false }),
@@ -107,6 +110,26 @@ export class Inspector {
         h('button', { class: 'btn small', onclick: () => this.app.saveDeviceAsTemplate(d) }, 'Save as custom object'),
         d.physicalOnly ? null : h('button', { class: 'btn small', onclick: () => { this.tab = 'console'; this.render(); } }, 'Open console')),
       h('p', { class: 'muted small' }, `Category: ${d.category} · Template: ${this.app.library.get(d.templateId)?.name || d.templateId + ' (missing)'} · ID ${d.id}`));
+  }
+
+  inventorySection(d) {
+    const inv = d.inv, S = { dev: d.id };
+    const ws = warrantyState(d);
+    const costOk = v => (v === '' || Number.isFinite(Number(v)) ? '' : 'Cost must be a number');
+    return h('div', null,
+      h('h4', null, 'Inventory'),
+      h('div', { class: 'row2' },
+        this.inp(inv, 'status', 'Status', 'all', { k: 'inv-status', type: 'select', options: INV_STATUS, label: 'Change status',
+          hint: isDeployed(d) ? '' : 'Not drawn in the 3D views and not monitored.' }),
+        this.inp(inv, 'assetTag', 'Asset tag', S, { k: 'inv-tag' })),
+      this.inp(inv, 'location', 'Storage location', S, { k: 'inv-loc', ph: 'e.g. garage shelf, box 3', hint: 'Where it is kept when it is not in a room or rack.' }),
+      h('div', { class: 'row2' },
+        this.inp(inv, 'purchased', 'Purchased', S, { k: 'inv-buy', type: 'date' }),
+        this.inp(inv, 'supplier', 'Supplier', S, { k: 'inv-sup' })),
+      h('div', { class: 'row2' },
+        this.inp(inv, 'cost', 'Cost', S, { k: 'inv-cost', ph: '0.00', validate: costOk }),
+        this.inp(inv, 'warranty', 'Warranty until', S, { k: 'inv-war', type: 'date',
+          hint: ws === 'expired' ? 'Expired.' : ws === 'soon' ? 'Ends within 90 days.' : '' })));
   }
 
   kvTable(d) {
@@ -619,7 +642,8 @@ export class Inspector {
     ap(body, h('h4', null, 'Monitoring agent'), this.monitorSection());
 
     // unplaced
-    const unplaced = lab.devices.filter(d => !d.virtual && !d.logical && !deviceRoomId(lab, d));
+    // deployed kit with no room; spares, parts and items with a storage location are not "missing"
+    const unplaced = lab.devices.filter(d => !d.virtual && !d.logical && !deviceRoomId(lab, d) && isDeployed(d) && !d.inv.location && d.category !== 'Parts');
     if (unplaced.length) {
       ap(body, h('h4', null, `Not placed in a room (${unplaced.length})`), h('div', { class: 'chips' }, unplaced.map(d =>
         h('span', { class: 'chip' }, h('button', { class: 'chip-name', onclick: () => app.select({ type: 'device', id: d.id }) }, d.name),

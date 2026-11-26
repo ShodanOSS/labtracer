@@ -10,6 +10,22 @@ export const portFamily = p => (p?.kind === 'power' || p?.kind === 'video' ? p.k
 export const MULTI_LINK = new Set(['wifi', 'tunnel']); // one radio / tunnel serves many peers
 export const L3_KINDS = new Set(['eth', 'sfp', 'wifi', 'vport', 'tunnel', 'svi', 'sub', 'loop']);
 
+// ---------------------------------------------------------------- inventory
+/** Lifecycle status. Only "deployed" statuses are drawn in the 3D views and monitored. */
+export const INV_STATUS = [['active', 'In service'], ['faulty', 'Faulty / in repair'], ['spare', 'Spare'], ['ordered', 'On order'], ['retired', 'Retired']];
+const DEPLOYED = new Set(['active', 'faulty']);
+export const invDefaults = () => ({ status: 'active', assetTag: '', location: '', purchased: '', supplier: '', cost: '', warranty: '' });
+export const isDeployed = d => DEPLOYED.has(d.inv?.status || 'active');
+export const statusLabel = s => (INV_STATUS.find(x => x[0] === s) || INV_STATUS[0])[1];
+/** Warranty end date vs today: 'expired' | 'soon' (90 days) | 'ok' | '' (no date). */
+export function warrantyState(d, now = new Date()) {
+  const w = d.inv?.warranty; if (!/^\d{4}-\d{2}-\d{2}$/.test(w || '')) return '';
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const [y, m, day] = w.split('-').map(Number), end = new Date(y, m - 1, day).getTime();
+  if (end < today) return 'expired';
+  return end - today <= 90 * 864e5 ? 'soon' : 'ok';
+}
+
 export function newLab(name = 'new-lab') {
   return {
     version: LAB_VERSION, name, notes: '',
@@ -54,6 +70,7 @@ export function createDevice(tpl, opts = {}) {
     passthrough: !!tpl.passthrough, wall: !!tpl.wall,
     l2: !!tpl.l2, l3: !!tpl.l3,
     vendor: tpl.vendor || '', model: tpl.model || '', serial: '', notes: '',
+    inv: invDefaults(),
     topo: { x: opts.x ?? 0, z: opts.z ?? 0 },
     phys: { roomId: opts.roomId ?? null, x: opts.px ?? 0, z: opts.pz ?? 0, rot: 0, elev: 0, elevAuto: true, mount: 'floor', rackId: null, rackU: null },
     attrs: Object.entries(tpl.attrs || {}).map(([k, v]) => ({ k, v })),
@@ -212,6 +229,8 @@ export function normalizeLab(lab) {
     d.phys = Object.assign({ roomId: null, x: 0, z: 0, rot: 0, elev: 0, elevAuto: true, mount: 'floor', rackId: null, rackU: null }, d.phys || {});
     d.dims ||= { w: 0.3, h: 0.1, d: 0.3 };
     d.ports = (d.ports || []).map(p => Object.assign(makePort(p), p));
+    d.inv = Object.assign(invDefaults(), d.inv || {});
+    if (!INV_STATUS.some(s => s[0] === d.inv.status)) d.inv.status = 'active';
     d.attrs ||= []; d.routes ||= []; d.vlans ||= []; d.ssids ||= []; d.services ||= []; d.files ||= [];
     for (const f of d.files) f.snapshots ||= [];
     if (d.ssh) { // SSH console target (no secrets: never a password)
