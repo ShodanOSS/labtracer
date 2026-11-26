@@ -62,7 +62,7 @@ async function startBrowser(profile) {
 
 test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
   const tmp = mkdtempSync(join(tmpdir(), 'labtracer-ui-'));
-  for (const f of ['server.py', 'ssh_bridge.py']) cpSync(join(ROOT, f), join(tmp, f));
+  for (const f of ['server.py', 'ssh_bridge.py', 'collector']) cpSync(join(ROOT, f), join(tmp, f), { recursive: true });
   cpSync(join(ROOT, 'app'), join(tmp, 'app'), { recursive: true });
   const csvFile = join(tmp, 'messy.csv'); writeFileSync(csvFile, CSV);
   const port = await freePort();
@@ -175,7 +175,7 @@ test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
     await page.keyboard.press('Escape'); await page.keyboard.press('1'); await sleep(300);
     await page.evaluate(() => { const a = window.labtracer; a.select({ type: 'device', id: a.lab.devices.find(x => x.l2 && x.ports.length > 1 && !x.physicalOnly && x.inv.status === 'active').id }); });
     const tabs = await page.$$eval('#inspector .tabs .tab', t => t.map(x => x.textContent));
-    assert.equal(tabs.length, 8);
+    assert.equal(tabs.length, 9);
     for (let i = 0; i < tabs.length; i++) {
       await page.evaluate(i => document.querySelectorAll('#inspector .tabs .tab')[i].click(), i); await sleep(80);
       assert.ok(await page.$eval('#inspector .insp-body', e => e.children.length > 0), `${tabs[i]} tab has content`);
@@ -200,6 +200,28 @@ test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
     assert.match(await page.$eval('.modal', e => e.textContent), /Render resolution cap/);
     await page.click('.modal .btn.primary'); await sleep(100);
     await page.keyboard.press('1'); await sleep(300);
+  });
+
+  await t.test('drift: facts from a device, accept into the model, undo', async () => {
+    const facts = JSON.parse(readFileSync(join(ROOT, 'tests/collect-fixtures/ios-switch.facts.json'), 'utf8'));
+    const vlan = () => page.evaluate(() => { const a = window.labtracer; return a.lab.devices.find(d => d.name === 'rack-switch').ports.find(p => p.name === 'Gi0/3').vlan; });
+    await page.evaluate(f => {
+      const a = window.labtracer, d = a.lab.devices.find(x => x.name === 'rack-switch');
+      a.collect.facts.set(d.id, f); a.onDriftChanged();
+      a.inspector.tab = 'drift'; a.select({ type: 'device', id: d.id });
+    }, facts);
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('.lbl')].some(e => /^Δ\d+$/.test(e.getAttribute('data-drift') || ''))), 'drift badge on the label');
+    const row = await page.evaluateHandle(() => [...document.querySelectorAll('#inspector .drow')].find(r => /Gi0\/3 is in VLAN 30/.test(r.textContent)));
+    assert.ok(await row.evaluate(r => !!r), 'the VLAN difference is listed');
+    assert.equal(await vlan(), 1);
+    await row.evaluate(r => r.querySelector('.mini.txt').click()); await sleep(150);
+    assert.equal(await vlan(), 30, 'accept changes the model');
+    assert.ok(!(await page.$eval('#inspector', e => /Gi0\/3 is in VLAN 30/.test(e.textContent))), 'the item is gone');
+    await page.click('#status-left'); await ctrl('z'); await sleep(150);
+    assert.equal(await vlan(), 1, 'undo');
+    await page.evaluate(() => { const a = window.labtracer; a.select(null); });
+    assert.match(await page.$eval('#inspector', e => e.textContent), /Drift: model vs devices/);
+    await page.evaluate(() => { const a = window.labtracer; a.collect.facts.clear(); a.onDriftChanged(); });
   });
 
   await t.test('undo and redo a move', async () => {

@@ -12,6 +12,7 @@ import { toast, confirmBox, closePopup } from './dialogs.js';
 import { MEDIA } from './templates.js';
 import { Monitor } from './monitor.js';
 import { SshManager } from './sshterm.js';
+import { Collector } from './collect.js';
 import { History } from './history.js';
 import { Panels } from './panels.js';
 import { migrateLab, migrateLibrary, LIBRARY_VERSION } from './migrations.js';
@@ -53,6 +54,7 @@ class App {
     this.cli = new Cli(this);
     this.monitor = new Monitor(this);
     this.ssh = new SshManager(this);
+    this.collect = new Collector(this);
     const invEl = h('div', { class: 'inv', hidden: true });
     document.getElementById('viewport').appendChild(invEl);
     this.inventory = new InventoryView(invEl, this);
@@ -106,6 +108,7 @@ class App {
     this.renderRoomSelect();
     store.setPref('lastLab', this.labName);
     if (this.monitor?.live) this.monitor.schedulePush();
+    this.collect?.load(); // facts read from the devices of this lab (drift)
     document.getElementById('lab-name').textContent = this.labName;
     document.title = `${this.labName} · LabTracer`;
     this.updateStatus();
@@ -209,6 +212,7 @@ class App {
     this.inspector.render();
     this.renderRoomSelect();
     this.updateStatus(label);
+    this.refreshDrift();
     if (this.monitor?.live) this.monitor.schedulePush();
   }
   selectionExists() {
@@ -231,6 +235,7 @@ class App {
     this.ssh.prune();
     if (this.inventoryOn) { this.viewportStale = true; this.inventory.render(); } else this.viewport.rebuildAll();
     this.inspector.render(); this.renderRoomSelect(); this.updateStatus();
+    this.refreshDrift();
     if (this.monitor?.live) this.monitor.schedulePush();
   }
 
@@ -330,6 +335,16 @@ class App {
     const typing = ae && document.getElementById('inspector').contains(ae) && /INPUT|TEXTAREA|SELECT/.test(ae.tagName);
     if (!typing) this.inspector.render();
   }
+
+  /** New facts or a collection step: drift badges, inspector and inventory. */
+  onDriftChanged() {
+    this.refreshDrift();
+    if (this.inventoryOn) this.inventory.renderBody();
+    const ae = document.activeElement;
+    const typing = ae && document.getElementById('inspector').contains(ae) && /INPUT|TEXTAREA|SELECT/.test(ae.tagName);
+    if (!typing) this.inspector.render();
+  }
+  refreshDrift() { if (this.collect && this.viewport) this.viewport.applyDrift(this.collect.summary()); }
 
   animatePing(r) {
     if (!r) return;

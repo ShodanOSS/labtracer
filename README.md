@@ -246,6 +246,7 @@ File > Export inventory (.csv) exports all items, in the same format. "Export CS
 | Configs | Generated running-config and your own config files. |
 | Console | IOS-style command line (Simulated), or a real SSH session to the device (SSH). |
 | Monitor | What the check agent tests on this device, and the live results. |
+| Drift | How the real device differs from the model (see [Drift](#drift-model-vs-device)). |
 
 ### Port kinds
 
@@ -385,6 +386,34 @@ To install and connect the agent, read `agent/README.md`.
 
 Live status needs server.py. It is not available when you open `index.html` directly.
 
+## Drift: model vs device
+
+The lab is the plan. Collect reads the real device over SSH and lists each difference: addresses, interfaces, switchport modes and VLANs, static routes, cabling (LLDP or CDP neighbors), open TCP ports, Proxmox VMs and containers, and inventory facts (vendor, model, serial, MAC, OS).
+
+Collect is read-only on the device. It runs `show` commands, `ip`, `ss`, `lldpctl` and `pvesh`. It never changes the device.
+
+| Platform | Driver | Notes |
+|---|---|---|
+| Linux, Proxmox VE, Raspberry Pi | `linux` | For neighbors, install `lldpd`. Proxmox guests and the serial number need root. |
+| DD-WRT and other BusyBox systems | `linux` | Reads `ifconfig`, `route -n` and `nvram`. |
+| Cisco IOS and IOS-XE | `ios` | `show running-config` needs privilege 15 (the prompt must end with `#`). |
+| MikroTik, Windows, OPNsense, UniFi | — | Planned. "Detect" names them and says they are not supported yet. |
+
+1. Set up SSH in the Console tab of the device (host, user, key). Collect uses the same settings and the same `data/ssh/known_hosts`.
+2. Open the Drift tab and click **Collect now**. To read every device with SSH settings, click **Collect all** in the lab panel (click an empty area of the 3D view).
+3. For each difference, choose:
+   - **Accept**: change the model to match the device. Ctrl+Z undoes it.
+   - **Ignore** (×): hide a difference you expect.
+   - To change the device instead, fix it in the SSH console and collect again.
+
+Labels in the 3D view show `Δ` and the number of errors and warnings. The Inventory view gets a Verified column with the date of the last collect (✓ when the serial matches).
+
+**Fill in inventory facts automatically** (lab panel) accepts vendor, model, serial, MAC and OS after each collect.
+
+**Compare config** shows the config that LabTracer generates from the model next to the config read from the device. **Save config to Configs** keeps a dated copy in the Configs tab.
+
+What the device reported is kept in `data/observed/<lab>/`, apart from the lab file. Drift needs server.py. It is not available when you open `index.html` directly.
+
 ## Custom objects
 
 1. Click "+ Custom object" in the left panel.
@@ -455,6 +484,7 @@ If the app is slow:
 - An SSH session starts with a POST request that must have the `X-LabTracer` header. The server answers with a one-time session ID, which is valid for 30 seconds. The WebSocket must give this ID and must come from the LabTracer page (Origin check).
 - Host, user and key path are validated. server.py starts `ssh` with an argument list, not with a shell.
 - SSH passwords are never stored. New host keys need your confirmation. Changed host keys are refused.
+- Collect (drift) uses the same rules as the SSH console: off on a network address, passwords used for one run only, new host keys confirmed by you. It only reads devices.
 
 ## Git
 
@@ -509,8 +539,8 @@ The tests are in the `tests` folder. They never use your `data` folder: the serv
 
 | Command | What it tests | Needs |
 |---|---|---|
-| `npm test` | `app/` matches `src/`; undo and redo (diff and patch, 300 random edits); format versions and migrations (every old file in `tests/fixtures` still opens); inventory: CSV parsing, import, export round trip. | Node.js 18 or later, and `npm install`. |
-| `npm run test:py` | server.py guards and save conflicts, ssh_bridge.py, the check agent. | Python 3.8 or later. The agent TLS test also needs the `openssl` command (it is skipped without it). |
+| `npm test` | `app/` matches `src/`; undo and redo (diff and patch, 300 random edits); format versions and migrations (every old file in `tests/fixtures` still opens); inventory: CSV parsing, import, export round trip; the drift report. | Node.js 18 or later, and `npm install`. |
+| `npm run test:py` | server.py guards and save conflicts, ssh_bridge.py, the check agent, the collector drivers (on recorded device output). | Python 3.8 or later. The agent TLS test also needs the `openssl` command (it is skipped without it). |
 | `npm run test:ui` | The app in a headless browser: every view, panel and tab, inventory, import, undo and redo, two-window saves, a damaged lab file. | `npm install`, Python 3, and Edge, Chrome or Chromium. |
 | `npm run test:all` | All of the above. | All of the above. |
 
@@ -526,6 +556,7 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 |---|---|
 | `server.py` | Local server and storage API. |
 | `ssh_bridge.py` | SSH console: WebSocket, paramiko and System ssh engines. |
+| `collector/` | Collect for the drift report: jobs (`__init__.py`), SSH commands (`conn.py`), stored facts (`store.py`), one driver per platform (`drivers/`). |
 | `app/` | The built web app (`index.html`, `style.css`, `app.js`). |
 | `build.mjs` | Build of `app/app.js` from `src/`, and the check that they match. |
 | `src/main.js` | App state, save, selection, views, keyboard. |
@@ -537,7 +568,7 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 | `src/viewport/` | The room and grid (`environment.js`), cables and cable routes (`cables.js`), live status and packet animation (`effects.js`), mouse input (`pointer.js`). |
 | `src/models3d.js` | Procedural 3D models and front panel textures. |
 | `src/inspector.js` | Properties panel: tabs and bound inputs. |
-| `src/inspector/` | One file for each tab of a device (`general.js`, `physical.js`, `ports.js`, `routing.js`, `files.js`, `console.js`, `monitor.js`), the link panel (`link.js`) and the lab panel (`lab.js`). |
+| `src/inspector/` | One file for each tab of a device (`general.js`, `physical.js`, `ports.js`, `routing.js`, `files.js`, `console.js`, `monitor.js`, `drift.js`), the link panel (`link.js`) and the lab panel (`lab.js`). |
 | `src/palette.js` | Device library and custom object editor. |
 | `src/cli.js` | Console commands and running-config generator. |
 | `src/netsim.js` | Network simulator. |
@@ -548,8 +579,11 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 | `src/monitor.js` | Live status from the check agent. |
 | `src/inventory.js` | Inventory table, CSV import and export. |
 | `src/sshterm.js` | SSH console in the browser (xterm.js). |
+| `src/drift.js` | Drift report: compares the model with the facts read from a device. |
+| `src/collect.js` | Collect in the browser: starts runs, keeps the facts of the open lab. |
 | `agent/` | The check agent, its systemd unit and its instructions. |
-| `tests/` | Tests: `build.test.mjs`, `history.test.mjs`, `migrations.test.mjs`, `inventory.test.mjs` (Node), `test_server.py` (Python), `ui.test.mjs` (browser). |
+| `tests/` | Tests: `build.test.mjs`, `history.test.mjs`, `migrations.test.mjs`, `inventory.test.mjs`, `drift.test.mjs` (Node), `test_server.py`, `test_collector.py` (Python), `ui.test.mjs` (browser). |
+| `tests/collect-fixtures/` | Recorded device output and the facts the drivers must make from it (`python tests/test_collector.py --regen` updates the facts after a deliberate parser change). |
 | `tests/fixtures/` | One saved lab and library for each format version. Frozen: never edit them. |
 
 Each file in `src/main/`, `src/inspector/` and `src/viewport/` holds a part class. `mixin()` in `src/util.js` copies its methods onto `App`, `Inspector` or `Viewport`. A method name can be in only one file: a duplicate stops the app at startup with an error.

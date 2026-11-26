@@ -1,6 +1,6 @@
 // Inventory view: a sortable, filterable table of every item in the lab,
 // plus CSV export and CSV import (new items and updates by name or serial).
-import { h, clear, download, pickFile, readFileText, parseCIDR, clone } from './util.js';
+import { h, clear, download, pickFile, readFileText, parseCIDR, clone, fmtTime } from './util.js';
 import {
   INV_STATUS, statusLabel, isDeployed, warrantyState, deviceRoomId, devById, isRack, createDevice, uniqueName,
   makePort, portByName, rackFits, rackFirstFree, showsInRoom, L3_KINDS, RACK_U,
@@ -277,6 +277,7 @@ export function applyImport(lab, header, rows, { update = true, library }) {
 
 // ---------------------------------------------------------------- the view
 // cell(d, lab) draws the cell; opt(d) marks a column that is hidden when it is empty for every row shown
+let observed = new Map(); // device id -> facts read from the device (src/collect.js), set on each render
 const COLS = [
   { key: 'name', label: 'Name', val: d => d.name.toLowerCase(),
     cell: d => h('td', null, h('span', { class: 'swatch dot', style: { background: d.color } }), d.name) },
@@ -295,6 +296,13 @@ const COLS = [
     cell: d => { const w = warrantyState(d); return h('td', { class: 'mono w-' + w, title: w === 'expired' ? 'Expired' : w === 'soon' ? 'Ends within 90 days' : '' }, d.inv.warranty); } },
   { key: 'cost', label: 'Cost', num: true, val: d => (d.inv.cost === '' ? -Infinity : Number(d.inv.cost) || 0), opt: d => d.inv.cost !== '',
     cell: d => h('td', { class: 'num' }, money(d.inv.cost)) },
+  { key: 'verified', label: 'Verified', val: d => observed.get(d.id)?.collected || 0, opt: d => observed.has(d.id),
+    cell: d => {
+      const f = observed.get(d.id); if (!f) return h('td', { class: 'muted' }, '—');
+      const s = f.system?.serial || '', same = s && d.serial && s.toLowerCase() === d.serial.toLowerCase(), differs = s && d.serial && !same;
+      return h('td', { class: 'mono' + (differs ? ' w-expired' : ''), title: differs ? `The device reports serial ${s}` : same ? 'The serial matches the device' : 'Last read from the device (Drift tab)' },
+        fmtTime(f.collected * 1000).slice(0, 10), same ? ' ✓' : differs ? ' ≠' : '');
+    } },
 ];
 
 export class InventoryView {
@@ -355,6 +363,7 @@ export class InventoryView {
       }
       return true;
     });
+    observed = this.app.collect?.facts || new Map();
     const col = COLS.find(c => c.key === this.sort.key) || COLS[0];
     const vals = new Map(out.map(d => [d, col.val(d, lab)]));
     return out.sort((a, b) => {

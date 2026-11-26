@@ -167,14 +167,14 @@ export class SshManager {
   }
 }
 
-function askPassword(target) {
+export function askPassword(target, note = 'The password goes to server.py for this one connection. It is not saved.') {
   return new Promise(res => {
     let done = false;
     const inp = h('input', { class: 'inp', type: 'password', autocomplete: 'off', onkeydown: e => { if (e.key === 'Enter') { done = true; res(inp.value); m.close(); } } });
     const m = modal('SSH password', h('div', null,
       h('div', { class: 'warn small' }, 'Password login is not recommended. Use it only for legacy devices that have no key-based login.'),
       h('label', { class: 'fld' }, h('span', null, `Password for ${target}`), inp),
-      h('p', { class: 'muted small' }, 'The password goes to server.py for this one connection. It is not saved.')),
+      h('p', { class: 'muted small' }, note)),
     [{ label: 'Cancel' }, { label: 'Connect', primary: true, onClick: () => { done = true; res(inp.value); } }],
     { onClose: () => { inp.value = ''; if (!done) res(null); } });
   });

@@ -312,3 +312,17 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 .inv-table td.w-expired, .inv-chip.w-expired { color: var(--err) !important; }
 .inv-table td.w-soon, .inv-chip.w-soon { color: var(--warn) !important; }
 .inv-warn { margin: 4px 0 0; padding-left: 18px; max-height: 220px; overflow-y: auto; }
+
+/* drift (src/inspector/drift.js) */
+.drift { display: flex; flex-direction: column; }
+.drow { display: grid; grid-template-columns: 10px 1fr auto; gap: 6px; align-items: start; padding: 3px 0; border-bottom: 1px solid #1c2b20; font-size: 12px; }
+.drow .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; background: #6b7686; }
+.drow.sev-error .dot { background: var(--err); } .drow.sev-warn .dot { background: var(--warn); } .drow.sev-info .dot { background: #5b8fd6; }
+.drow.ign { opacity: .55; }
+.drow .btnrow.tight { flex-wrap: nowrap; }
+.drow .mini.txt { white-space: nowrap; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+.stbadge.sev-error { color: var(--err); border-color: #7a3030; } .stbadge.sev-warn { color: var(--warn); border-color: #6e5520; } .stbadge.sev-info { color: #8ec5ff; border-color: #3c5a78; }
+.drift-ign, .drift-raw { margin-top: 8px; }
+.drift-raw pre { max-height: 300px; overflow: auto; }
+.lbl[data-drift]::after { content: attr(data-drift); position: absolute; top: -8px; right: -10px; font: 600 9.5px var(--mono); padding: 0 4px; border-radius: 7px; background: #3a2e12; color: var(--warn); border: 1px solid #6e5520; }
+.lbl.drift-err[data-drift]::after { background: #3c1412; color: var(--err); border-color: #7a3030; }

@@ -321,6 +321,59 @@ class WebSocket:
 
 
 # ---------------------------------------------------------------- engines
+def fingerprint(key) -> str:
+    """OpenSSH-style SHA256 fingerprint of a paramiko key."""
+    return "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+
+
+def remember_host_key(client, hostname, key):
+    """Trust a host key: for this client and in data/ssh/known_hosts."""
+    client.get_host_keys().add(hostname, key.get_name(), key)
+    KNOWN_HOSTS.parent.mkdir(parents=True, exist_ok=True)
+    with _lock, open(KNOWN_HOSTS, "a", encoding="utf-8") as fh:
+        fh.write(f"{hostname} {key.get_name()} {key.get_base64()}\n")
+
+
+def open_client(p, password=None, policy=None):
+    """A connected paramiko SSHClient for validated params p (see validate()).
+    Used by the console and by the collector, so both use the same algorithms,
+    keys and host key files. policy decides about unknown host keys (default: refuse).
+    A changed host key is always refused (BadHostKeyException)."""
+    if load_paramiko() is None:
+        raise ValueError("paramiko is not installed. Run: pip install paramiko")
+    c = paramiko.SSHClient()
+    try:
+        c.load_system_host_keys()
+    except Exception:  # noqa: BLE001
+        pass
+    if KNOWN_HOSTS.is_file():
+        c.load_host_keys(str(KNOWN_HOSTS))
+    c.set_missing_host_key_policy(policy or paramiko.RejectPolicy())
+    if p["legacy"]:
+        # old servers: no rsa-sha2 signatures, so sign with plain ssh-rsa
+        disabled = {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
+    else:
+        # like current OpenSSH: no SHA-1 key exchange, no ssh-rsa signatures
+        t = paramiko.Transport
+        disabled = {"kex": [k for k in SHA1_KEX if k in getattr(t, "_kex_info", {})],
+                    "keys": [k for k in ("ssh-rsa",) if k in getattr(t, "_preferred_keys", ())],
+                    "pubkeys": [k for k in ("ssh-rsa",) if k in getattr(t, "_preferred_pubkeys", ())]}
+    kw = dict(hostname=p["host"], port=p["port"], username=p["user"] or None, timeout=10,
+              banner_timeout=15, auth_timeout=30, disabled_algorithms=disabled)
+    if p["auth"] == "password":
+        kw.update(password=password or "", look_for_keys=False, allow_agent=False)
+    else:
+        kw.update(key_filename=p["keyFile"] or None, look_for_keys=True, allow_agent=True)
+    try:
+        c.connect(**kw)
+    except BaseException:
+        c.close()
+        raise
+    finally:
+        kw.pop("password", None)
+    return c
+
+
 class ParamikoEngine:
     def __init__(self, p, ws, trust_q):
         self.p, self.ws, self.trust_q = p, ws, trust_q
@@ -332,52 +385,20 @@ class ParamikoEngine:
 
         class AskUser(paramiko.MissingHostKeyPolicy):
             def missing_host_key(self, client, hostname, key):
-                fp = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
-                ws.send_json({"type": "hostkey", "host": hostname, "keytype": key.get_name(), "fingerprint": "SHA256:" + fp})
+                ws.send_json({"type": "hostkey", "host": hostname, "keytype": key.get_name(), "fingerprint": fingerprint(key)})
                 try:
                     ok = trust_q.get(timeout=TRUST_WAIT)
                 except queue.Empty:
                     ok = False
                 if not ok:
                     raise paramiko.SSHException("host key not trusted")
-                client.get_host_keys().add(hostname, key.get_name(), key)
-                KNOWN_HOSTS.parent.mkdir(parents=True, exist_ok=True)
-                with open(KNOWN_HOSTS, "a", encoding="utf-8") as fh:
-                    fh.write(f"{hostname} {key.get_name()} {key.get_base64()}\n")
+                remember_host_key(client, hostname, key)
                 ws.send_json({"type": "status", "text": f"Host key saved in {KNOWN_HOSTS}"})
         return AskUser()
 
     def connect(self, cols, rows, password=None):
-        p = self.p
-        c = paramiko.SSHClient()
-        self.client = c
-        try:
-            c.load_system_host_keys()
-        except Exception:  # noqa: BLE001
-            pass
-        if KNOWN_HOSTS.is_file():
-            c.load_host_keys(str(KNOWN_HOSTS))
-        c.set_missing_host_key_policy(self._policy())
-        if p["legacy"]:
-            # old servers: no rsa-sha2 signatures, so sign with plain ssh-rsa
-            disabled = {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
-        else:
-            # like current OpenSSH: no SHA-1 key exchange, no ssh-rsa signatures
-            t = paramiko.Transport
-            disabled = {"kex": [k for k in SHA1_KEX if k in getattr(t, "_kex_info", {})],
-                        "keys": [k for k in ("ssh-rsa",) if k in getattr(t, "_preferred_keys", ())],
-                        "pubkeys": [k for k in ("ssh-rsa",) if k in getattr(t, "_preferred_pubkeys", ())]}
-        kw = dict(hostname=p["host"], port=p["port"], username=p["user"] or None, timeout=10,
-                  banner_timeout=15, auth_timeout=30, disabled_algorithms=disabled)
-        if p["auth"] == "password":
-            kw.update(password=password or "", look_for_keys=False, allow_agent=False)
-        else:
-            kw.update(key_filename=p["keyFile"] or None, look_for_keys=True, allow_agent=True)
-        try:
-            c.connect(**kw)
-        finally:
-            kw.pop("password", None)
-        self.chan = c.invoke_shell(term="xterm-256color", width=cols, height=rows)
+        self.client = open_client(self.p, password, self._policy())
+        self.chan = self.client.invoke_shell(term="xterm-256color", width=cols, height=rows)
 
     def read(self):
         return self.chan.recv(32768)

@@ -11,12 +11,22 @@ export class Effects {
     for (const id of this.objs.keys()) this.setStatus(id);
     this.requestRender();
   }
+  /** Drift badges on labels: map device id -> {error, warn, info}. */
+  applyDrift(map) {
+    this.driftMap = map || new Map();
+    for (const id of this.objs.keys()) this.setStatus(id);
+    this.requestRender();
+  }
   setStatus(id) {
     const o = this.objs.get(id); if (!o) return;
     const st = this.statusMap.get(id);
     const el = o.label.element;
     for (const c of ['st-up', 'st-down', 'st-degraded', 'st-unknown']) el.classList.remove(c);
     if (st) el.classList.add('st-' + st);
+    const dr = this.driftMap?.get(id);
+    const n = dr ? dr.error + dr.warn : 0;
+    el.classList.toggle('drift-err', !!dr?.error); el.classList.toggle('drift-warn', !dr?.error && !!dr?.warn);
+    if (n) el.setAttribute('data-drift', `Δ${n}`); else el.removeAttribute('data-drift');
     if (o.ring) { o.root.remove(o.ring); o.ring.geometry.dispose(); o.ring = null; }
     const d = devById(this.app.lab, id);
     if (!st || !d || (this.mode === 'room' && d.phys.mount === 'rack')) return;

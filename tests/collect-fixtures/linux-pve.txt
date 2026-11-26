@@ -1,0 +1,35 @@
+@@uname
+Linux
+@@hostname
+srv-01
+@@osrelease
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
+VERSION_ID="12"
+ID=debian
+@@pveversion
+pve-manager/8.2.4/faa83925c9641325 (running kernel: 6.8.8-2-pve)
+@@ipaddr
+[{"ifindex":1,"ifname":"lo","flags":["LOOPBACK","UP","LOWER_UP"],"mtu":65536,"operstate":"UNKNOWN","link_type":"loopback","address":"00:00:00:00:00:00","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8},{"family":"inet6","local":"::1","prefixlen":128}]},{"ifindex":2,"ifname":"eno1","flags":["BROADCAST","MULTICAST","UP","LOWER_UP"],"mtu":1500,"master":"vmbr0","operstate":"UP","link_type":"ether","address":"3c:ec:ef:12:34:56","addr_info":[]},{"ifindex":3,"ifname":"eno2","flags":["BROADCAST","MULTICAST"],"mtu":1500,"operstate":"DOWN","link_type":"ether","address":"3c:ec:ef:12:34:57","addr_info":[]},{"ifindex":4,"ifname":"vmbr0","flags":["BROADCAST","MULTICAST","UP","LOWER_UP"],"mtu":1500,"operstate":"UP","link_type":"ether","address":"3c:ec:ef:12:34:56","addr_info":[{"family":"inet","local":"192.168.20.11","prefixlen":24,"label":"vmbr0"}]},{"ifindex":5,"ifname":"tap100i0","flags":["BROADCAST","MULTICAST","PROMISC","UP","LOWER_UP"],"mtu":1500,"master":"vmbr0","operstate":"UNKNOWN","link_type":"ether","address":"ea:6b:1c:00:00:01","addr_info":[]},{"ifindex":6,"ifname":"wg0","flags":["POINTOPOINT","NOARP","UP","LOWER_UP"],"mtu":1420,"operstate":"UNKNOWN","link_type":"none","addr_info":[{"family":"inet","local":"10.99.0.2","prefixlen":24}]}]
+@@iproute
+[{"dst":"default","gateway":"192.168.20.1","dev":"vmbr0","protocol":"kernel","flags":["onlink"]},{"dst":"10.99.0.0/24","dev":"wg0","protocol":"kernel","scope":"link","prefsrc":"10.99.0.2","flags":[]},{"dst":"10.50.0.0/16","dev":"wg0","protocol":"boot","scope":"link","flags":[]},{"dst":"192.168.20.0/24","dev":"vmbr0","protocol":"kernel","scope":"link","prefsrc":"192.168.20.11","flags":[]}]
+@@ipaddrtxt
+@@iproutetxt
+@@listen
+LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*
+LISTEN 0      4096       127.0.0.1:85         0.0.0.0:*
+LISTEN 0      4096               *:8006             *:*
+LISTEN 0      100            [::1]:25              [::]:*
+LISTEN 0      4096            [::]:111           [::]:*
+@@lldp
+{"lldp":{"interface":{"eno1":{"via":"LLDP","chassis":{"rack-switch":{"id":{"type":"mac","value":"00:1b:54:aa:bb:cc"},"descr":"Cisco IOS Software"}},"port":{"id":{"type":"ifname","value":"Gi0/2"},"descr":"GigabitEthernet0/2"}}}}}
+@@dmi
+sys_vendor=Supermicro
+product_name=SYS-5019C-M
+product_serial=
+@@devicetree
+
+@@pve
+[{"id":"qemu/100","name":"dc01","node":"srv-01","status":"running","type":"qemu","vmid":100},{"id":"lxc/101","name":"pihole","node":"srv-01","status":"stopped","type":"lxc","vmid":101},{"id":"qemu/200","name":"other","node":"srv-02","status":"running","type":"qemu","vmid":200}]
+@@nvram
+@@end

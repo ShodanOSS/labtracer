@@ -13,6 +13,7 @@
 !/package-lock.json
 !/server.py
 !/ssh_bridge.py
+!/collector/
 !/start.bat
 !/start.sh
 !/app/

@@ -9,10 +9,11 @@ import { RoutingTab } from './inspector/routing.js';
 import { FilesTab } from './inspector/files.js';
 import { ConsoleTab } from './inspector/console.js';
 import { MonitorPanels } from './inspector/monitor.js';
+import { DriftTab } from './inspector/drift.js';
 import { LinkPanel } from './inspector/link.js';
 import { LabPanel } from './inspector/lab.js';
 
-const TABS = [['general', 'General'], ['physical', 'Physical'], ['ports', 'Ports'], ['routing', 'Routing'], ['services', 'Services'], ['files', 'Configs'], ['console', 'Console'], ['monitor', 'Monitor']];
+const TABS = [['general', 'General'], ['physical', 'Physical'], ['ports', 'Ports'], ['routing', 'Routing'], ['services', 'Services'], ['files', 'Configs'], ['console', 'Console'], ['monitor', 'Monitor'], ['drift', 'Drift']];
 const ROOM_TABS = TABS.slice(0, 2); // racks, desks, shelves: no ports, configs or console
 
 export class Inspector {
@@ -88,4 +89,4 @@ export class Inspector {
   }
 }
 
-mixin(Inspector, GeneralTab, PhysicalTab, PortsTab, RoutingTab, FilesTab, ConsoleTab, MonitorPanels, LinkPanel, LabPanel);
+mixin(Inspector, GeneralTab, PhysicalTab, PortsTab, RoutingTab, FilesTab, ConsoleTab, MonitorPanels, DriftTab, LinkPanel, LabPanel);

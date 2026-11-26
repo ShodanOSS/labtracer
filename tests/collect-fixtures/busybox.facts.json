@@ -1,0 +1,117 @@
+{
+ "factsVersion": 1,
+ "collected": 0,
+ "driver": "linux",
+ "ok": true,
+ "errors": [],
+ "system": {
+  "hostname": "DD-WRT",
+  "vendor": "",
+  "model": "Linksys WRT54G/GL/GS",
+  "serial": "",
+  "os": "DD-WRT",
+  "osVersion": ""
+ },
+ "interfaces": [
+  {
+   "name": "br0",
+   "mac": "00:14:bf:aa:bb:01",
+   "mtu": 1500,
+   "adminUp": true,
+   "operUp": true,
+   "speed": "",
+   "ips": [
+    "192.168.1.1/24"
+   ],
+   "dhcp": false,
+   "mode": null,
+   "vlan": null,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "",
+   "kind": "eth",
+   "master": ""
+  },
+  {
+   "name": "eth1",
+   "mac": "00:14:bf:aa:bb:02",
+   "mtu": 1500,
+   "adminUp": true,
+   "operUp": true,
+   "speed": "",
+   "ips": [
+    "203.0.113.7/24"
+   ],
+   "dhcp": false,
+   "mode": null,
+   "vlan": null,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "",
+   "kind": "eth",
+   "master": ""
+  },
+  {
+   "name": "eth2",
+   "mac": "00:14:bf:aa:bb:03",
+   "mtu": null,
+   "adminUp": false,
+   "operUp": false,
+   "speed": "",
+   "ips": [],
+   "dhcp": false,
+   "mode": null,
+   "vlan": null,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "",
+   "kind": "eth",
+   "master": ""
+  },
+  {
+   "name": "lo",
+   "mac": "",
+   "mtu": 16436,
+   "adminUp": true,
+   "operUp": true,
+   "speed": "",
+   "ips": [
+    "127.0.0.1/8"
+   ],
+   "dhcp": false,
+   "mode": null,
+   "vlan": null,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "",
+   "kind": "loop",
+   "master": ""
+  }
+ ],
+ "routes": [
+  {
+   "dest": "0.0.0.0/0",
+   "via": "203.0.113.1",
+   "dev": ""
+  },
+  {
+   "dest": "10.8.0.0/16",
+   "via": "192.168.1.2",
+   "dev": ""
+  }
+ ],
+ "vlans": null,
+ "neighbors": null,
+ "listening": [
+  {
+   "port": 22,
+   "proto": "tcp"
+  },
+  {
+   "port": 80,
+   "proto": "tcp"
+  }
+ ],
+ "guests": null,
+ "rawConfig": ""
+}

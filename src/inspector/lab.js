@@ -1,5 +1,5 @@
 // Inspector: the lab panel shown when nothing is selected. Rooms, cable routing,
-// monitoring agent, unplaced devices and the address plan.
+// monitoring agent, drift, unplaced devices and the address plan.
 import { h, ap, uid, intToIp } from '../util.js';
 import { deviceRoomId, isDeployed } from '../model.js';
 import { l3Ifaces, duplicateIps } from '../netsim.js';
@@ -33,6 +33,7 @@ export class LabPanel {
 
     // monitoring
     ap(body, h('h4', null, 'Monitoring agent'), this.monitorSection());
+    ap(body, h('h4', null, 'Drift: model vs devices'), this.driftSection());
 
     // unplaced
     // deployed kit with no room; spares, parts and items with a storage location are not "missing"

@@ -63,6 +63,7 @@ class ServerTest(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="labtracer-test-"))
         for f in ("server.py", "ssh_bridge.py"):
             shutil.copy2(ROOT / f, cls.tmp / f)
+        shutil.copytree(ROOT / "collector", cls.tmp / "collector", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copytree(ROOT / "app", cls.tmp / "app")
         cls.port = free_port()
         cls.proc = subprocess.Popen([sys.executable, "server.py", "--port", str(cls.port), "--no-browser"],
@@ -192,6 +193,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.req("GET", "/api/ping")[0], 200, "the server keeps running")
         names = [x["name"] for x in self.req("GET", "/api/labs")[2]]
         self.assertIn("broken", names, "a damaged lab is still listed, so it can be opened or deleted")
+
+
+    def test_collect_endpoints(self):
+        st, _, body = self.req("GET", "/api/observed/nolab")
+        self.assertEqual((st, body), (200, {"devices": {}}))
+        st, _, _ = self.req("GET", "/api/observed/nolab/dev_x")
+        self.assertEqual(st, 404)
+        st, _, _ = self.req("GET", "/api/collect/jobs/nope")
+        self.assertEqual(st, 404)
+        st, _, body = self.req("POST", "/api/collect/lab1", {"devices": "x"}, {"X-LabTracer": "1"})
+        self.assertEqual(st, 400)
+        st, _, _ = self.req("POST", "/api/collect/lab1", {"devices": []})
+        self.assertEqual(st, 403, "collect needs the X-LabTracer header")
+        st, _, body = self.req("GET", "/api/collect/caps")
+        self.assertEqual(st, 200)
+        self.assertIn("linux", body["supported"])
+        # a bad host fails at once, with no connection attempt
+        st, _, body = self.req("POST", "/api/collect/lab1", {"devices": [{"id": "dev_1", "host": "-oProxyCommand=x"}]}, {"X-LabTracer": "1"})
+        self.assertEqual(st, 200)
+        self.assertEqual(body["devices"]["dev_1"]["state"], "error")
 
 
 class SshBridgeTest(unittest.TestCase):

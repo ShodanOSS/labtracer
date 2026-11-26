@@ -1,0 +1,168 @@
+{
+ "factsVersion": 1,
+ "collected": 0,
+ "driver": "ios",
+ "ok": true,
+ "errors": [],
+ "system": {
+  "hostname": "rack-switch",
+  "vendor": "Cisco",
+  "model": "WS-C2960X-48TS-L",
+  "serial": "FOC1234X0YZ",
+  "os": "Cisco IOS",
+  "osVersion": "15.2(7)E8"
+ },
+ "interfaces": [
+  {
+   "name": "GigabitEthernet0/1",
+   "mac": "",
+   "mtu": null,
+   "adminUp": false,
+   "operUp": false,
+   "speed": "",
+   "ips": [],
+   "dhcp": false,
+   "mode": "access",
+   "vlan": 1,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "uplink spare",
+   "kind": "eth",
+   "master": ""
+  },
+  {
+   "name": "GigabitEthernet0/2",
+   "mac": "",
+   "mtu": null,
+   "adminUp": true,
+   "operUp": true,
+   "speed": "",
+   "ips": [],
+   "dhcp": false,
+   "mode": "access",
+   "vlan": 20,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "srv-01 eno1",
+   "kind": "eth",
+   "master": ""
+  },
+  {
+   "name": "GigabitEthernet0/3",
+   "mac": "",
+   "mtu": null,
+   "adminUp": true,
+   "operUp": false,
+   "speed": "",
+   "ips": [],
+   "dhcp": false,
+   "mode": "access",
+   "vlan": 30,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "",
+   "kind": "eth",
+   "master": ""
+  },
+  {
+   "name": "GigabitEthernet0/48",
+   "mac": "",
+   "mtu": null,
+   "adminUp": true,
+   "operUp": true,
+   "speed": "",
+   "ips": [],
+   "dhcp": false,
+   "mode": "trunk",
+   "vlan": null,
+   "nativeVlan": 1,
+   "trunkVlans": "1,10,20,30,40",
+   "desc": "to edge-router lan3",
+   "kind": "eth",
+   "master": ""
+  },
+  {
+   "name": "Vlan1",
+   "mac": "",
+   "mtu": null,
+   "adminUp": false,
+   "operUp": false,
+   "speed": "",
+   "ips": [],
+   "dhcp": false,
+   "mode": "routed",
+   "vlan": null,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "",
+   "kind": "svi",
+   "master": ""
+  },
+  {
+   "name": "Vlan10",
+   "mac": "",
+   "mtu": null,
+   "adminUp": true,
+   "operUp": true,
+   "speed": "",
+   "ips": [
+    "192.168.10.2/24"
+   ],
+   "dhcp": false,
+   "mode": "routed",
+   "vlan": null,
+   "nativeVlan": null,
+   "trunkVlans": null,
+   "desc": "",
+   "kind": "svi",
+   "master": ""
+  }
+ ],
+ "routes": [
+  {
+   "dest": "10.0.0.0/8",
+   "via": "192.168.10.254",
+   "dev": ""
+  },
+  {
+   "dest": "0.0.0.0/0",
+   "via": "192.168.10.1",
+   "dev": ""
+  }
+ ],
+ "vlans": [
+  {
+   "id": 1,
+   "name": "default"
+  },
+  {
+   "id": 10,
+   "name": "mgmt"
+  },
+  {
+   "id": 20,
+   "name": "servers"
+  },
+  {
+   "id": 30,
+   "name": "clients"
+  }
+ ],
+ "neighbors": [
+  {
+   "localPort": "Gi0/2",
+   "remoteName": "srv-01.lab.local",
+   "remotePort": "eno1",
+   "remoteMac": "3c:ec:ef:12:34:56"
+  },
+  {
+   "localPort": "Gi0/48",
+   "remoteName": "edge-router",
+   "remotePort": "lan3",
+   "remoteMac": "00:14:bf:aa:bb:01"
+  }
+ ],
+ "listening": null,
+ "guests": null,
+ "rawConfig": "!\n!\nversion 15.2\nhostname rack-switch\n!\nvlan 10\n name mgmt\n!\ninterface GigabitEthernet0/1\n description uplink spare\n shutdown\n!\ninterface GigabitEthernet0/2\n description srv-01 eno1\n switchport access vlan 20\n switchport mode access\n!\ninterface GigabitEthernet0/3\n switchport access vlan 30\n switchport mode access\n!\ninterface GigabitEthernet0/48\n description to edge-router lan3\n switchport trunk native vlan 1\n switchport trunk allowed vlan 1,10,20,30\n switchport trunk allowed vlan add 40\n switchport mode trunk\n!\ninterface Vlan1\n no ip address\n shutdown\n!\ninterface Vlan10\n ip address 192.168.10.2 255.255.255.0\n!\nip default-gateway 192.168.10.1\nip route 10.0.0.0 255.0.0.0 192.168.10.254\n!\nend\n"
+}

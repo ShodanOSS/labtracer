@@ -241,6 +241,10 @@ export function normalizeLab(lab) {
       d.ssh = Object.assign({ host: '', port: 22, user: '', engine: '', auth: 'key', keyFile: '', legacy: false }, d.ssh);
       delete d.ssh.password;
     }
+    if (d.collect) { // drift collection settings (src/drift.js collectConf)
+      d.collect = Object.assign({ enabled: true, driver: 'auto', ignore: [] }, d.collect);
+      if (!Array.isArray(d.collect.ignore)) d.collect.ignore = [];
+    }
   }
   for (const d of lab.devices) if (isRack(d) || isFurniture(d)) d.ports = []; // room objects take no cables
   const ids = new Set(lab.devices.map(d => d.id));

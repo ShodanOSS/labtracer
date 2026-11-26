@@ -13,6 +13,8 @@ Security posture:
   * All names are sanitised; paths can not leave ./data.
   * SSH console (ssh_bridge.py): off on a non-loopback bind; a WebSocket
     needs a one-time id from a header-guarded POST and a same-origin Origin.
+  * Collector (collector/): reads devices over SSH for the drift report.
+    Read-only on devices, off on a non-loopback bind, never stores passwords.
 """
 
 import argparse
@@ -33,7 +35,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+import collector
 import ssh_bridge
+from collector import store as observed
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = ROOT / "app"
@@ -275,6 +279,19 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(ssh_bridge.caps())
         if path == "/api/ssh/ws":
             return self._ssh_ws()
+        if path == "/api/collect/caps":
+            return self._json(collector.caps())
+        if path.startswith("/api/collect/jobs/"):
+            snap = collector.snapshot(unquote(path[len("/api/collect/jobs/"):]))
+            return self._json(snap) if snap else self._error(HTTPStatus.NOT_FOUND, "no such job")
+        if path.startswith("/api/observed/"):
+            parts = [unquote(x) for x in path[len("/api/observed/"):].split("/")]
+            if len(parts) == 1:
+                return self._json({"devices": observed.read_all(safe_name(parts[0]))})
+            if len(parts) == 2:
+                doc = observed.read(safe_name(parts[0]), parts[1])
+                return self._json(doc) if doc else self._error(HTTPStatus.NOT_FOUND, "nothing collected yet")
+            return self._error(HTTPStatus.NOT_FOUND, "unknown endpoint")
         if path.startswith("/api/"):
             return self._error(HTTPStatus.NOT_FOUND, "unknown endpoint")
         return super().do_GET()
@@ -403,6 +420,13 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/ssh/session":
             try:
                 return self._json(ssh_bridge.new_session(data))
+            except PermissionError as exc:
+                return self._error(HTTPStatus.FORBIDDEN, str(exc))
+            except ValueError as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        if path.startswith("/api/collect/"):
+            try:
+                return self._json(collector.start(safe_name(unquote(path[len("/api/collect/"):])), data))
             except PermissionError as exc:
                 return self._error(HTTPStatus.FORBIDDEN, str(exc))
             except ValueError as exc:
