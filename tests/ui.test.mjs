@@ -85,7 +85,7 @@ test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
   const open = async () => {
     const p = await browser.newPage();
     p.on('pageerror', e => errors.push(e.message));
-    p.on('console', m => { if (m.type() === 'error' && !/status of 409/.test(m.text())) errors.push(m.text()); }); // 409 = intended conflict test
+    p.on('console', m => { if (m.type() === 'error' && !/status of (409|422)/.test(m.text())) errors.push(m.text()); }); // 409, 422 = intended conflict and damaged-lab tests
     await p.goto(`http://127.0.0.1:${port}/`);
     await p.waitForFunction(() => window.labtracer?.lab, { timeout: 15000 });
     await sleep(600);
@@ -168,6 +168,160 @@ test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
     assert.match(await page.$eval('.modal', e => e.textContent), /changed in another window/i);
     await page.click('.modal .btn.danger'); await sleep(600);
     assert.ok(await page.evaluate(() => !window.labtracer.conflict && !window.labtracer.dirty), 'Replace saves');
+  });
+
+  await t.test('every view, panel and inspector tab renders', async () => {
+    await page.bringToFront();
+    await page.keyboard.press('Escape'); await page.keyboard.press('1'); await sleep(300);
+    await page.evaluate(() => { const a = window.labtracer; a.select({ type: 'device', id: a.lab.devices.find(x => x.l2 && x.ports.length > 1 && !x.physicalOnly && x.inv.status === 'active').id }); });
+    const tabs = await page.$$eval('#inspector .tabs .tab', t => t.map(x => x.textContent));
+    assert.equal(tabs.length, 8);
+    for (let i = 0; i < tabs.length; i++) {
+      await page.evaluate(i => document.querySelectorAll('#inspector .tabs .tab')[i].click(), i); await sleep(80);
+      assert.ok(await page.$eval('#inspector .insp-body', e => e.children.length > 0), `${tabs[i]} tab has content`);
+    }
+    await page.evaluate(() => { const a = window.labtracer; a.inspector.tab = 'ports'; a.inspector.render(); document.querySelector('#inspector .prow:not(.head) .mini').click(); });
+    assert.ok(await page.$('#inspector .pdetail'), 'port details open');
+    await page.evaluate(() => { const a = window.labtracer; a.select({ type: 'link', id: a.lab.links[0].id }); });
+    assert.match(await page.$eval('#inspector .title', e => e.textContent), /↔/);
+    await page.evaluate(() => window.labtracer.select(null));
+    assert.match(await page.$eval('#inspector', e => e.textContent), /Address plan/);
+    await page.keyboard.press('2'); await sleep(400);
+    await page.evaluate(() => { const a = window.labtracer; const r = a.lab.devices.find(x => x.shape === 'rack'); a.setRoom(a.lab.devices.find(x => x.shape === 'rack').phys.roomId); a.inspector.tab = 'physical'; a.select({ type: 'device', id: r.id }); });
+    assert.ok(await page.$('#inspector .rack-el'), 'rack elevation');
+    assert.ok(await page.evaluate(() => window.labtracer.viewport.objs.size > 0), 'room view draws devices');
+    await page.keyboard.press('l');
+    assert.match(await page.$eval('#status-left', e => e.textContent), /Link tool/);
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => window.labtracer.fileMenu(document.getElementById('btn-file')));
+    assert.ok(await page.$('.popup'), 'File menu');
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => window.labtracer.settingsDialog());
+    assert.match(await page.$eval('.modal', e => e.textContent), /Render resolution cap/);
+    await page.click('.modal .btn.primary'); await sleep(100);
+    await page.keyboard.press('1'); await sleep(300);
+  });
+
+  await t.test('undo and redo a move', async () => {
+    const r = await page.evaluate(() => {
+      const a = window.labtracer, d = a.lab.devices.find(x => !x.physicalOnly && x.inv.status === 'active');
+      const x0 = d.topo.x; d.topo.x = x0 + 3; a.afterDrag(d);
+      return { id: d.id, x0 };
+    });
+    const x = () => page.evaluate(id => [window.labtracer.lab.devices.find(d => d.id === id).topo.x, window.labtracer.viewport.objs.get(id).root.position.x], r.id);
+    assert.deepEqual(await x(), [r.x0 + 3, r.x0 + 3]);
+    await page.click('#status-left'); await ctrl('z'); await sleep(150);
+    assert.deepEqual(await x(), [r.x0, r.x0], 'undo moves it back, in the model and in the view');
+    await ctrl('y'); await sleep(150);
+    assert.deepEqual(await x(), [r.x0 + 3, r.x0 + 3], 'redo');
+  });
+
+  await t.test('a damaged lab file does not stop the app', async () => {
+    writeFileSync(join(tmp, 'data', 'labs', 'aaa-damaged.json'), '{"devices": [');
+    await page.evaluate(() => localStorage.setItem('labtracer.pref.lastLab', '"aaa-damaged"'));
+    const p3 = await open();
+    assert.equal(await p3.evaluate(() => window.labtracer.labName), 'example-lab', 'the next lab opens');
+    assert.match(await p3.$eval('body', e => e.textContent), /aaa-damaged.json is damaged/, 'the user is told why');
+    await p3.close();
+  });
+
+  await t.test('dragging a device rebuilds only its own cables', async () => {
+    await page.bringToFront(); await page.keyboard.press('Escape'); await page.keyboard.press('1'); await sleep(300);
+    // a device with cables, at a screen point where the picker finds it
+    const hit = await page.evaluate(() => {
+      const a = window.labtracer, vp = a.viewport, r = vp.renderer.domElement.getBoundingClientRect();
+      for (const [id, o] of vp.objs) {
+        const d = a.lab.devices.find(x => x.id === id);
+        if (![...vp.linkObjs.values()].some(lo => lo.a === id || lo.b === id)) continue; // needs a drawn cable
+        const v = o.root.position.clone(); v.y += d.dims.h * o.scale * 0.5; v.project(vp.camera);
+        const p = { clientX: r.left + (v.x + 1) / 2 * r.width, clientY: r.top + (1 - v.y) / 2 * r.height };
+        if (vp.pick(p)?.id === id) {
+          window.__groups = new Map([...vp.linkObjs].map(([k, lo]) => [k, lo.group]));
+          return { id, x: p.clientX, y: p.clientY, x0: d.topo.x };
+        }
+      }
+      return null;
+    });
+    assert.ok(hit, 'found a device to drag');
+    await page.mouse.move(hit.x, hit.y); await page.mouse.down();
+    for (let i = 1; i <= 6; i++) { await page.mouse.move(hit.x + i * 15, hit.y + i * 4); await sleep(30); }
+    await page.mouse.up(); await sleep(200);
+    const r = await page.evaluate(id => {
+      const a = window.labtracer, vp = a.viewport, same = [], rebuilt = [], stale = [];
+      for (const [lid, lo] of vp.linkObjs) {
+        const l = a.lab.links.find(x => x.id === lid), mine = l.a.dev === id || l.b.dev === id;
+        const kept = window.__groups.get(lid) === lo.group;
+        (mine ? (kept ? stale : rebuilt) : (kept ? same : stale)).push(lid);
+      }
+      return { x: a.lab.devices.find(d => d.id === id).topo.x, same: same.length, rebuilt: rebuilt.length, stale: stale.length, total: vp.linkObjs.size, children: vp.linkGroup.children.length };
+    }, hit.id);
+    assert.notEqual(r.x, hit.x0, 'the device moved');
+    assert.ok(r.rebuilt > 0, 'its cables were rebuilt');
+    assert.ok(r.same > 0, 'the other cables were kept');
+    assert.equal(r.stale, 0, 'no cable kept by mistake, none rebuilt by mistake');
+    assert.equal(r.children, r.total, 'no orphan cable objects left in the scene');
+    await page.click('#status-left'); await ctrl('z'); await sleep(150);
+  });
+
+  await t.test('side panels: click to hide and show, drag to resize, keys, kept after reload', async () => {
+    const w = (p = page) => p.evaluate(() => ({
+      left: document.getElementById('palette').getBoundingClientRect().width,
+      right: document.getElementById('inspector').getBoundingClientRect().width,
+      view: document.getElementById('viewport').getBoundingClientRect().width,
+      canvas: window.labtracer.viewport.renderer.domElement.clientWidth,
+    }));
+    const box = async side => page.$eval(`.split[data-side="${side}"]`, e => { const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+    const click = async side => { const b = await box(side); await page.mouse.click(b.x, b.y); await sleep(250); };
+    const w0 = await w();
+    await click('left');
+    let w1 = await w();
+    assert.equal(w1.left, 0, 'click hides the library');
+    assert.ok(w1.view > w0.view + w0.left - 20, 'the view takes the space');
+    // the canvas follows on the next ResizeObserver callback: wait for it, a busy machine can take a while
+    const grew = await page.waitForFunction(min => window.labtracer.viewport.renderer.domElement.clientWidth > min, { timeout: 5000 }, w0.canvas + 100).then(() => true, () => false);
+    assert.ok(grew, `the 3D canvas follows the new size: ${JSON.stringify([w0, await w()])}`);
+    await click('left');
+    assert.equal((await w()).left, w0.left, 'click shows it again at the same width');
+
+    const b = await box('right');
+    await page.mouse.move(b.x, b.y); await page.mouse.down();
+    for (let i = 1; i <= 5; i++) { await page.mouse.move(b.x - i * 20, b.y); await sleep(20); }
+    await page.mouse.up(); await sleep(250);
+    w1 = await w();
+    assert.ok(Math.abs(w1.right - (w0.right + 100)) <= 2, `drag widens the properties panel (${w0.right} -> ${w1.right})`);
+    assert.ok(await page.$eval('main', e => !e.classList.contains('right-off')), 'a drag is not a click');
+
+    await page.keyboard.press(']'); await sleep(200);
+    assert.equal((await w()).right, 0, '] hides the properties panel');
+    assert.ok(await page.$eval('#inspector', e => e.inert), 'a hidden panel takes no focus');
+    await page.keyboard.press('['); await sleep(200);
+    const p2 = await open();
+    const saved = await w(p2);
+    assert.equal(saved.left, 0, 'hidden library kept after reload');
+    assert.equal(saved.right, 0, 'hidden properties panel kept after reload');
+    await p2.close();
+    await page.bringToFront();
+    await page.keyboard.press(']'); await sleep(200);
+    assert.ok(Math.abs((await w()).right - w1.right) <= 2, 'shown again at the dragged width');
+    await page.keyboard.press(']'); await sleep(200);
+    await page.evaluate(() => { const a = window.labtracer; a.openConsole(a.lab.devices.find(d => !d.physicalOnly && d.inv.status === 'active').id); });
+    await sleep(200);
+    assert.ok((await w()).right > 0, 'opening a console shows the hidden properties panel');
+    await page.keyboard.press('['); await sleep(200); // leave both panels open
+    await page.evaluate(() => { const a = window.labtracer; a.panels.state.right.w = null; a.panels.apply(); a.panels.save(); });
+  });
+
+  await t.test('a lab from a newer LabTracer is refused and not changed', async () => {
+    const file = join(tmp, 'data', 'labs', 'aaa-newer.json');
+    const newer = JSON.stringify({ version: 99, name: 'aaa-newer', rooms: [], devices: [], links: [], futureField: { keep: true } });
+    writeFileSync(file, newer);
+    await page.evaluate(() => localStorage.setItem('labtracer.pref.lastLab', '"aaa-newer"'));
+    const p3 = await open();
+    assert.equal(await p3.evaluate(() => window.labtracer.labName), 'example-lab', 'another lab opens');
+    assert.match(await p3.$eval('body', e => e.textContent), /aaa-newer: this lab has format 99/, 'the user is told why');
+    await p3.evaluate(() => window.labtracer.save(true)); await sleep(300);
+    assert.equal(readFileSync(file, 'utf8'), newer, 'the newer file is untouched');
+    await p3.close();
   });
 
   await t.test('no page errors', () => assert.deepEqual(errors, []));

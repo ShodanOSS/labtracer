@@ -1,8 +1,9 @@
 // Lab document model and helpers.
 import { BUILTIN, RACK_U } from './templates.js';
 import { uid, clone } from './util.js';
+import { LAB_VERSION, migrateLab } from './migrations.js';
 
-export const LAB_VERSION = 1;
+export { LAB_VERSION };
 export const LINKABLE = new Set(['eth', 'sfp', 'wifi', 'vport', 'tunnel', 'console', 'usb', 'video', 'power']);
 export const NON_IP = new Set(['power', 'console', 'usb', 'video']); // ports outside the IP network
 /** Power only plugs into power, video only into video, everything else is data. */
@@ -216,9 +217,12 @@ export function rackFirstFree(lab, rack, dev) {
 }
 export { RACK_U };
 
-/** Bring older or hand-edited lab files up to the current shape. */
+/**
+ * Bring older or hand-edited lab files up to the current shape: run the format migrations
+ * (src/migrations.js), then fill in missing fields. Throws for a lab from a newer LabTracer.
+ */
 export function normalizeLab(lab) {
-  lab.version = LAB_VERSION;
+  migrateLab(lab);
   lab.rooms ||= [];
   lab.devices ||= [];
   lab.links ||= [];

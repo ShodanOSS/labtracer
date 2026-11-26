@@ -1,25 +1,26 @@
 {
   "name": "labtracer",
   "version": "1.0.0",
+  "private": true,
   "description": "Local 3D homelab modeller: topology, room view, device configs, network simulation",
-  "main": "index.js",
+  "license": "UNLICENSED",
+  "type": "module",
   "scripts": {
-    "test": "node --test tests/inventory.test.mjs",
+    "test": "node --test tests/build.test.mjs tests/history.test.mjs tests/inventory.test.mjs tests/migrations.test.mjs",
     "test:py": "node tests/run-py.mjs",
     "test:ui": "node --test tests/ui.test.mjs",
     "test:all": "npm test && npm run test:py && npm run test:ui",
-    "build": "esbuild src/main.js --bundle --format=iife --minify --target=chrome90,firefox90 --outfile=app/app.js",
-    "dev": "esbuild src/main.js --bundle --format=iife --sourcemap --outfile=app/app.js --watch"
+    "build": "node build.mjs",
+    "check:build": "node build.mjs --check",
+    "dev": "node build.mjs --watch"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
   "devDependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "esbuild": "^0.24.0",
     "puppeteer-core": "^23.11.1",
     "three": "^0.170.0"
-  },
-  "type": "module"
+  }
 }

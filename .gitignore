@@ -6,6 +6,8 @@
 /*
 
 !/.gitignore
+!/.gitattributes
+!/build.mjs
 !/README.md
 !/package.json
 !/package-lock.json

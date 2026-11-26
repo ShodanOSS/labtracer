@@ -6,9 +6,10 @@ const LS = 'labtracer.';
 
 async function j(r) {
   if (!r.ok) {
-    let m = r.statusText;
-    try { m = (await r.json()).error || m; } catch { /* ignore */ }
-    const e = new Error(m); e.conflict = r.status === 409; throw e;
+    let m = r.statusText, body = null;
+    try { body = await r.json(); m = body.error || m; } catch { /* ignore */ }
+    // 409 is also "saved by a newer LabTracer" (body.newer): that is not a two-window conflict
+    const e = new Error(m); e.conflict = r.status === 409 && !!body?.conflict; e.newer = !!body?.newer; throw e;
   }
   return r.json();
 }
@@ -46,15 +47,24 @@ export const store = {
     if (!s) throw new Error('no such lab');
     return JSON.parse(s);
   },
-  /** force: overwrite even if another window saved this lab since we loaded it. */
-  async saveLab(name, lab, { force = false } = {}) {
+  /**
+   * force: overwrite even if another window saved this lab since we loaded it.
+   * keepCopy: keep a copy of the file that is replaced (the first save after a format upgrade).
+   * oldVersion: its format version, for the name of the copy in browser storage.
+   */
+  async saveLab(name, lab, { force = false, keepCopy = false, oldVersion = null } = {}) {
     const body = JSON.stringify(lab);
     if (this.mode === 'server') {
       const headers = { ...HDR, 'X-LabTracer-Base': this.versions[name] || 'new' };
       if (force) headers['X-LabTracer-Force'] = '1';
+      if (keepCopy) headers['X-LabTracer-Keep-Copy'] = '1';
       const res = await j(await fetch('/api/labs/' + encodeURIComponent(name), { method: 'PUT', headers, body }));
       if (res.version) this.versions[name] = res.version;
       return res;
+    }
+    const old = keepCopy ? localStorage.getItem(LS + 'lab.' + name) : null;
+    if (old) { // shows in File > Open lab as "<name>.format1-backup"
+      try { localStorage.setItem(`${LS}lab.${name}.format${oldVersion || 1}-backup`, old); } catch { throw new Error('Browser storage is full, so the copy of the old format can not be kept. Export the lab to a file.'); }
     }
     try { localStorage.setItem(LS + 'lab.' + name, body); } catch (e) { throw new Error('Browser storage is full. Export the lab to a file.'); }
     return { ok: true };
@@ -71,10 +81,15 @@ export const store = {
     if (this.mode === 'server') return j(await fetch('/api/library', { cache: 'no-store' }));
     try { return JSON.parse(localStorage.getItem(LS + 'library') || '{"templates":[]}'); } catch { return { templates: [] }; }
   },
-  async saveLibrary(lib) {
+  /** keepCopy: keep a copy of the library file that is replaced (the first save after a format upgrade). */
+  async saveLibrary(lib, { keepCopy = false, oldVersion = null } = {}) {
     const body = JSON.stringify(lib);
-    if (this.mode === 'server') return j(await fetch('/api/library', { method: 'PUT', headers: HDR, body }));
-    try { localStorage.setItem(LS + 'library', body); } catch { throw new Error('Browser storage is full (large 3D models?).'); }
+    if (this.mode === 'server') return j(await fetch('/api/library', { method: 'PUT', headers: keepCopy ? { ...HDR, 'X-LabTracer-Keep-Copy': '1' } : HDR, body }));
+    const old = keepCopy ? localStorage.getItem(LS + 'library') : null;
+    try {
+      if (old) localStorage.setItem(`${LS}library.format${oldVersion || 1}-backup`, old);
+      localStorage.setItem(LS + 'library', body);
+    } catch { throw new Error('Browser storage is full (large 3D models?).'); }
     return { ok: true };
   },
   /** files: [{device, name, content}] */

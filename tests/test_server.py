@@ -140,6 +140,59 @@ class ServerTest(unittest.TestCase):
     def test_lab_must_be_a_lab(self):
         self.assertEqual(self.req("PUT", "/api/labs/x", {"nope": 1}, {"X-LabTracer": "1"})[0], 400)
 
+    # ---- format versions
+    def history_of(self, name):
+        return list((self.tmp / "data" / "labs" / ".history").glob(f"{name}.*.json"))
+
+    def test_keep_copy_after_a_format_upgrade(self):
+        name = "upgrade-test"
+        self.assertEqual(self.put_lab(name, doc={"devices": [], "version": 1})[0], 200)
+        before = len(self.history_of(name))
+        h = {"X-LabTracer": "1", "X-LabTracer-Keep-Copy": "1"}
+        st, _, _ = self.req("PUT", f"/api/labs/{name}", {"devices": [], "version": 2}, h)
+        self.assertEqual(st, 200)
+        self.assertEqual(len(self.history_of(name)), before + 1, "the old format is kept in .history")
+
+    def test_newer_format_is_never_overwritten(self):
+        name = "newer-test"
+        self.assertEqual(self.put_lab(name, doc={"devices": [], "version": 3})[0], 200)
+        for force in (False, True):
+            st, _, doc = self.put_lab(name, force=force, doc={"devices": [], "version": 2})
+            self.assertEqual(st, 409, f"force={force}")
+            self.assertTrue(doc.get("newer"))
+            self.assertFalse(doc.get("conflict"), "not reported as a two-window conflict")
+            self.assertIn("format 3", doc["error"])
+        self.assertEqual(self.put_lab(name, doc={"devices": []})[0], 409, "no version = format 1")
+        self.assertEqual(self.put_lab(name, doc={"devices": [], "version": 3})[0], 200, "same format saves")
+        self.assertEqual(self.put_lab(name, doc={"devices": [], "version": 4})[0], 200, "newer format saves")
+
+    def test_library_versions(self):
+        h = {"X-LabTracer": "1"}
+        hist = self.tmp / "data" / ".history"
+        self.assertEqual(self.req("PUT", "/api/library", {"templates": [], "version": 1}, h)[0], 200)
+        n = len(list(hist.glob("library.*.json"))) if hist.exists() else 0
+        st, _, _ = self.req("PUT", "/api/library", {"templates": [], "version": 2}, {**h, "X-LabTracer-Keep-Copy": "1"})
+        self.assertEqual(st, 200)
+        self.assertEqual(len(list(hist.glob("library.*.json"))), n + 1, "copy of the old library kept")
+        st, _, doc = self.req("PUT", "/api/library", {"templates": []}, h)
+        self.assertEqual(st, 409)
+        self.assertTrue(doc["newer"])
+        self.assertEqual(self.req("PUT", "/api/library", {"templates": [], "version": 1}, h)[0], 409)
+        (self.tmp / "data" / "library.json").unlink()  # the other tests start without a library
+
+    def test_damaged_lab_gives_a_clear_error(self):
+        labs = self.tmp / "data" / "labs"
+        (labs / "broken.json").write_text('{"devices": [', "utf-8")
+        (labs / "binary.json").write_bytes(b"\xff\xfe\x00garbage")
+        for name in ("broken", "binary"):
+            st, _, doc = self.req("GET", f"/api/labs/{name}")
+            self.assertEqual(st, 422, name)
+            self.assertIn("damaged", doc["error"])
+        self.assertIn("line 1", self.req("GET", "/api/labs/broken")[2]["error"])
+        self.assertEqual(self.req("GET", "/api/ping")[0], 200, "the server keeps running")
+        names = [x["name"] for x in self.req("GET", "/api/labs")[2]]
+        self.assertIn("broken", names, "a damaged lab is still listed, so it can be opened or deleted")
+
 
 class SshBridgeTest(unittest.TestCase):
     def test_paramiko_not_loaded_at_import(self):

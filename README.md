@@ -60,11 +60,19 @@ You can open `app/index.html` directly in the browser. In this mode, the app kee
 | `data/labs/<name>.json` | One file for each lab. |
 | `data/labs/.history/` | Older copies of each lab. The server keeps a copy at most every 10 minutes and keeps the last 40 copies. |
 | `data/library.json` | Your custom objects (device templates). |
+| `data/.history/` | Copies of `library.json` from before a format upgrade. |
 | `data/export/<lab>/<device>/` | Config files from File > Export all configs. |
 | `data/monitor.json` | Agent address and token. Do not put this file in git. |
 | `data/ssh/known_hosts` | Host keys that you trusted in the SSH console (paramiko engine). |
 
 If the same lab is open in two browser windows or tabs, a window cannot silently overwrite the other window's saved changes. Autosave stops in the window with the older version, and Ctrl+S asks which version to keep. If you replace the other version, a copy of it goes into `data/labs/.history/`.
+
+### Files from other LabTracer versions
+
+Each lab file and `library.json` has a format version (`"version"` in the file).
+
+- A file from an older LabTracer opens normally. LabTracer upgrades it in memory and tells you. The first save keeps a copy of the old file: labs in `data/labs/.history/`, the library in `data/.history/`. In browser storage mode, the copy shows in File > Open lab as `<name>.format1-backup`.
+- A file from a newer LabTracer does not open. Update LabTracer. LabTracer never writes over it: the server also refuses a save in an older format, for example from a browser tab that was open while you updated the app. Reload that tab.
 
 Undo and redo history lives only in the browser tab. It is not saved, and it is gone when you reload the page or stop the server.
 
@@ -92,6 +100,10 @@ Mouse controls:
 | Wheel | Zoom. |
 | Click | Select a device or a link. |
 | Double-click a device | Open its console. |
+| Click the bar beside a side panel | Hide or show the panel. |
+| Drag the bar beside a side panel | Make the panel wider or narrower. Drag it almost to the edge to hide it. |
+
+The left panel (device library) and the right panel (properties) can be hidden, to give the 3D view more space. Click the bar between the panel and the view. A hidden panel leaves a narrow bar with an arrow: click it to show the panel again. Keys `[` and `]` do the same. The widths and hidden panels are kept in the browser. Double-click a device to open its console: this also shows the properties panel if it is hidden.
 
 In the room view:
 
@@ -404,6 +416,7 @@ Use small, low-poly `.glb` files (less than 1 MB if possible). Large models make
 | F | Fit the view |
 | T | Top-down view |
 | 1, 2, 3 | Topology view, room view, inventory |
+| [ , ] | Hide or show the left panel, the right panel |
 | Ctrl+Z, Ctrl+Y | Undo, redo |
 | Ctrl+S | Save |
 | Ctrl+O | Open a lab |
@@ -469,8 +482,26 @@ Do this only if you change files in `src/`.
 
 1. Install Node.js 18 or later.
 2. Run `npm install`.
-3. Run `npm run build`. This writes `app/app.js`.
-4. Optional: run `npm run dev` to rebuild on each change.
+3. Run `npm run build`. This writes `app/app.js` and `app/app.css`.
+4. Optional: run `npm run dev` to rebuild on each change. This build is not minified and has a source map. Run `npm run build` again before you commit.
+
+`app/app.js` and `app/app.css` are in git, so the app runs without Node.js. Commit them together with the `src/` change that made them:
+
+- `npm test` fails if they are not the build of the current `src/`. To check only this, run `npm run check:build`.
+- `git diff` shows them as binary (see `.gitattributes`), so the diffs show only your source changes.
+- On a merge conflict in these files, do not merge them by hand. Run `npm run build` and add the result.
+
+## Change the lab format
+
+Do this when a change in `src/` renames, moves or removes a field in the lab file (or in `library.json`). A new field with a default value needs no format change: `normalizeLab()` in `src/model.js` fills it in.
+
+1. In `src/migrations.js`, add a step at the end of `LAB_STEPS` (or `LIBRARY_STEPS`): `{ to: <last version + 1>, note: 'what changed', up(lab) { ... } }`. The step changes a file of the previous format into the new format.
+2. Never change a step after a release. Users have files of every older format.
+3. Save a lab in the new format as `tests/fixtures/lab-v<new version>.json` (or `library-v<n>.json`).
+4. Add the file to `tests/fixtures/FROZEN.json`. Run `npm test`: the error message gives the hash to add.
+5. Do not edit the older fixtures. They stand for real files on users' disks.
+
+`npm test` fails if a step number is missing, if a format has no fixture, or if a fixture changed.
 
 ## Tests
 
@@ -478,9 +509,9 @@ The tests are in the `tests` folder. They never use your `data` folder: the serv
 
 | Command | What it tests | Needs |
 |---|---|---|
-| `npm test` | Inventory logic: CSV parsing, import, export round trip. | Node.js 18 or later. |
+| `npm test` | `app/` matches `src/`; undo and redo (diff and patch, 300 random edits); format versions and migrations (every old file in `tests/fixtures` still opens); inventory: CSV parsing, import, export round trip. | Node.js 18 or later, and `npm install`. |
 | `npm run test:py` | server.py guards and save conflicts, ssh_bridge.py, the check agent. | Python 3.8 or later. The agent TLS test also needs the `openssl` command (it is skipped without it). |
-| `npm run test:ui` | The app in a headless browser: inventory, import, undo, two-window saves. | `npm install`, Python 3, and Edge, Chrome or Chromium. |
+| `npm run test:ui` | The app in a headless browser: every view, panel and tab, inventory, import, undo and redo, two-window saves, a damaged lab file. | `npm install`, Python 3, and Edge, Chrome or Chromium. |
 | `npm run test:all` | All of the above. | All of the above. |
 
 Without Node.js, run the Python tests with `python -m unittest discover -s tests -v`.
@@ -496,10 +527,17 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 | `server.py` | Local server and storage API. |
 | `ssh_bridge.py` | SSH console: WebSocket, paramiko and System ssh engines. |
 | `app/` | The built web app (`index.html`, `style.css`, `app.js`). |
-| `src/main.js` | App state, undo, save, tools, keyboard. |
-| `src/viewport.js` | Three.js views, picking, dragging, packet animation. |
+| `build.mjs` | Build of `app/app.js` from `src/`, and the check that they match. |
+| `src/main.js` | App state, save, selection, views, keyboard. |
+| `src/main/` | App features: placing devices (`placement.js`), the link tool (`linking.js`), edits (`edits.js`), the File menu (`files.js`), the Settings dialog (`settings.js`). |
+| `src/history.js` | Undo and redo. Each step keeps only the changes (`src/patch.js`). |
+| `src/migrations.js` | Format versions of lab and library files, and the steps that upgrade older files. |
+| `src/panels.js` | Side panels: hide, show and resize. |
+| `src/viewport.js` | Three.js views: scene, devices, selection, camera. |
+| `src/viewport/` | The room and grid (`environment.js`), cables and cable routes (`cables.js`), live status and packet animation (`effects.js`), mouse input (`pointer.js`). |
 | `src/models3d.js` | Procedural 3D models and front panel textures. |
-| `src/inspector.js` | Properties panel. |
+| `src/inspector.js` | Properties panel: tabs and bound inputs. |
+| `src/inspector/` | One file for each tab of a device (`general.js`, `physical.js`, `ports.js`, `routing.js`, `files.js`, `console.js`, `monitor.js`), the link panel (`link.js`) and the lab panel (`lab.js`). |
 | `src/palette.js` | Device library and custom object editor. |
 | `src/cli.js` | Console commands and running-config generator. |
 | `src/netsim.js` | Network simulator. |
@@ -511,6 +549,9 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 | `src/inventory.js` | Inventory table, CSV import and export. |
 | `src/sshterm.js` | SSH console in the browser (xterm.js). |
 | `agent/` | The check agent, its systemd unit and its instructions. |
-| `tests/` | Tests: `inventory.test.mjs` (Node), `test_server.py` (Python), `ui.test.mjs` (browser). |
+| `tests/` | Tests: `build.test.mjs`, `history.test.mjs`, `migrations.test.mjs`, `inventory.test.mjs` (Node), `test_server.py` (Python), `ui.test.mjs` (browser). |
+| `tests/fixtures/` | One saved lab and library for each format version. Frozen: never edit them. |
+
+Each file in `src/main/`, `src/inspector/` and `src/viewport/` holds a part class. `mixin()` in `src/util.js` copies its methods onto `App`, `Inspector` or `Viewport`. A method name can be in only one file: a duplicate stops the app at startup with an error.
 
 Three.js and xterm.js (MIT licence) are bundled into `app/app.js` and `app/app.css`.

@@ -8,7 +8,16 @@
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 var(--sans); overflow: hidden; }
 button { font: inherit; color: inherit; }
 body { display: grid; grid-template-rows: 42px 1fr 24px; }
-main { display: grid; grid-template-columns: 236px 1fr 430px; min-height: 0; }
+/* Panel widths: --lw / --rw (set by src/panels.js when you resize; else the defaults below).
+   A hidden panel gets width 0 and a wider splitter (--ls / --rs) with an arrow to bring it back. */
+main {
+  --lw: 236px; --rw: 430px; --ls: 7px; --rs: 7px;
+  display: grid; min-height: 0;
+  grid-template-columns: min(var(--lw), 45vw) var(--ls) minmax(0, 1fr) var(--rs) min(var(--rw), 60vw);
+}
+main.left-off { --lw: 0px; --ls: 16px; }
+main.right-off { --rw: 0px; --rs: 16px; }
+main.left-off #palette, main.right-off #inspector { visibility: hidden; }
 .grow { flex: 1; }
 .muted { color: var(--muted); }
 .small { font-size: 11.5px; }
@@ -31,9 +40,21 @@ main { display: grid; grid-template-columns: 236px 1fr 430px; min-height: 0; }
 .badge-mode { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; margin-right: 4px; }
 
 /* ---------- panels */
-aside { background: var(--panel); min-height: 0; display: flex; flex-direction: column; }
-#palette { border-right: 1px solid var(--line); }
-#inspector { border-left: 1px solid var(--line); }
+aside { background: var(--panel); min-height: 0; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
+/* splitter between a side panel and the view: drag to resize, click to hide or show */
+.split { position: relative; z-index: 2; background: var(--panel); border-left: 1px solid var(--line); border-right: 1px solid var(--line); cursor: col-resize; touch-action: none; outline: none; }
+.split::before { content: ''; position: absolute; left: 50%; top: 50%; width: 2px; height: 34px; margin: -17px 0 0 -1px; border-radius: 1px; background: var(--line2); }
+.split::after { content: ''; position: absolute; inset: 0 -4px; } /* wider grab area */
+.split:hover, .split:focus-visible, .split.drag { background: var(--panel2); }
+.split:hover::before, .split:focus-visible::before, .split.drag::before { background: var(--accent); }
+main.left-off .split[data-side="left"], main.right-off .split[data-side="right"] { cursor: pointer; background: var(--panel2); }
+main.left-off .split[data-side="left"]::before, main.right-off .split[data-side="right"]::before {
+  width: auto; height: auto; margin: 0; transform: translate(-50%, -50%); background: none; color: var(--text); font-size: 14px;
+}
+main.left-off .split[data-side="left"]::before { content: '▸'; }
+main.right-off .split[data-side="right"]::before { content: '◂'; }
+main.left-off .split[data-side="left"]:hover::before, main.right-off .split[data-side="right"]:hover::before { background: none; color: var(--accent); }
+body.resizing, body.resizing * { cursor: col-resize !important; user-select: none !important; }
 #viewport { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 #viewport canvas { display: block; outline: none; }
 #status { display: flex; justify-content: space-between; align-items: center; padding: 0 10px; background: var(--panel); border-top: 1px solid var(--line); color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; }
@@ -221,8 +242,8 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 .toast.out { opacity: 0; transform: translateY(8px); }
 ::-webkit-scrollbar { width: 9px; height: 9px; } ::-webkit-scrollbar-thumb { background: #29402f; border-radius: 6px; } ::-webkit-scrollbar-track { background: transparent; }
 
-@media (max-width: 1440px) { main { grid-template-columns: 210px 1fr 390px; } }
-@media (max-width: 1100px) { main { grid-template-columns: 180px 1fr 340px; } .brand { display: none; } }
+@media (max-width: 1440px) { main { --lw: 210px; --rw: 390px; } }
+@media (max-width: 1100px) { main { --lw: 180px; --rw: 340px; } .brand { display: none; } }
 .btnrow select.inp, .btnrow input.inp { width: auto; flex: 1; max-width: 260px; }
 
 /* live status */

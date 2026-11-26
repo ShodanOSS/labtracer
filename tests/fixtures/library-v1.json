@@ -1,0 +1,37 @@
+{
+ "templates": [
+  {
+   "id": "cus_fixture01",
+   "name": "Fixture 8-port switch",
+   "category": "Network",
+   "shape": "switch",
+   "face": "ports",
+   "bays": 0,
+   "dims": { "w": 0.25, "h": 0.03, "d": 0.12 },
+   "uHeight": 0,
+   "rackUnits": 0,
+   "levels": null,
+   "color": "#2f4f6f",
+   "l2": true,
+   "l3": false,
+   "ssids": [],
+   "wall": false,
+   "virtual": false,
+   "physicalOnly": false,
+   "logical": false,
+   "passthrough": false,
+   "vendor": "Example",
+   "model": "SW-8",
+   "ports": [
+    { "name": "p1", "kind": "eth", "speed": "1G", "mode": "access" },
+    { "name": "p2", "kind": "eth", "speed": "1G", "mode": "access" },
+    { "name": "psu0", "kind": "power", "speed": "", "mode": "access" }
+   ],
+   "portRows": [
+    { "prefix": "p", "start": 1, "count": 2, "kind": "eth", "speed": "1G" },
+    { "prefix": "psu", "start": 0, "count": 1, "kind": "power", "speed": "" }
+   ],
+   "attrs": { "Firmware": "" }
+  }
+ ]
+}

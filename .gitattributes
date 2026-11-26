@@ -1,0 +1,9 @@
+# app/app.js and app/app.css are built from src/ (npm run build). They are committed so the
+# app runs without Node.js. Diffs of minified code are noise: git shows them as binary.
+# -text: no line-ending conversion, so the build check compares the exact bytes.
+# On a merge conflict in these files, do not merge them: run npm run build.
+app/app.js  -text -diff linguist-generated=true
+app/app.css -text -diff linguist-generated=true
+
+# Frozen test files: byte for byte as released (see tests/migrations.test.mjs).
+tests/fixtures/** -text

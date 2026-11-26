@@ -6,6 +6,22 @@ export function uid(prefix = 'id') {
 
 export function clone(o) { return JSON.parse(JSON.stringify(o)); }
 
+/**
+ * Copy the methods of part classes onto a class. Large classes (App, Inspector, Viewport)
+ * keep their core in one file and their features in src/<name>/*.js. A method name may be
+ * defined only once: a clash throws at startup instead of silently replacing a method.
+ */
+export function mixin(target, ...parts) {
+  for (const part of parts) {
+    for (const k of Object.getOwnPropertyNames(part.prototype)) {
+      if (k === 'constructor') continue;
+      if (Object.prototype.hasOwnProperty.call(target.prototype, k)) throw new Error(`${target.name}.${k} is defined twice (${part.name})`);
+      Object.defineProperty(target.prototype, k, Object.getOwnPropertyDescriptor(part.prototype, k));
+    }
+  }
+  return target;
+}
+
 /** h('div', {class:'x', onclick:fn}, child, 'text', [more]) */
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -31,6 +47,9 @@ function appendKids(el, kids) {
     else el.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
   }
 }
+
+/** Append children to el, skipping null, undefined and false, flattening arrays. Returns el. */
+export function ap(el, ...kids) { el.append(...kids.flat(Infinity).filter(x => x !== null && x !== undefined && x !== false)); return el; }
 
 export function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
 

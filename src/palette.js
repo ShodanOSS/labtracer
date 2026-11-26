@@ -5,6 +5,9 @@ import { createDevice } from './model.js';
 import { modal, toast, confirmBox } from './dialogs.js';
 import { Viewport } from './viewport.js';
 import { forgetModel } from './models3d.js';
+import { libraryFromFile, LIBRARY_VERSION } from './migrations.js';
+
+const LOCKED = 'The custom library is from a newer LabTracer. Update LabTracer to change custom objects.';
 
 const ICONS = {
   rackmount: '<rect x="2" y="9" width="20" height="6" rx="1"/><path d="M5 12h2M9 12h2M13 12h2"/>',
@@ -84,10 +87,10 @@ export class Palette {
   }
 
   async importTemplates() {
+    if (this.app.libraryLocked) return toast(LOCKED, 'err', 6000);
     const f = await pickFile('.json,application/json'); if (!f) return;
     try {
-      const data = JSON.parse(await readFileText(f));
-      const list = Array.isArray(data) ? data : (data.templates || [data]);
+      const list = libraryFromFile(JSON.parse(await readFileText(f))).templates; // older files are migrated; newer ones refused
       let n = 0, upd = 0;
       const lib = this.app.library;
       for (const t of list) {
@@ -106,11 +109,12 @@ export class Palette {
   }
   exportTemplates() {
     if (!this.app.library.custom.length) return toast('No custom templates yet', 'warn');
-    download('labtracer-templates.json', JSON.stringify({ templates: this.app.library.custom }, null, 1), 'application/json');
+    download('labtracer-templates.json', JSON.stringify({ version: LIBRARY_VERSION, templates: this.app.library.custom }, null, 1), 'application/json');
   }
 
   // ---------------------------------------------------------------- custom object editor
   editTemplate(tpl, isCopy = false) {
+    if (this.app.libraryLocked) return toast(LOCKED, 'err', 6000);
     const isNew = !tpl || isCopy;
     const t = tpl ? clone(tpl) : {
       name: 'New device', category: 'Custom', shape: 'box', face: 'plain', dims: { w: 0.3, h: 0.06, d: 0.25 },

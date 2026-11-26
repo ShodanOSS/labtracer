@@ -42,6 +42,7 @@ LAB_DIR = DATA_DIR / "labs"
 HISTORY_DIR = LAB_DIR / ".history"
 EXPORT_DIR = DATA_DIR / "export"
 LIBRARY_FILE = DATA_DIR / "library.json"
+LIBRARY_HISTORY_DIR = DATA_DIR / ".history"  # copies of library.json before a format upgrade
 MONITOR_FILE = DATA_DIR / "monitor.json"  # agent URL + token; keep out of git
 
 MAX_BODY = 64 * 1024 * 1024  # 64 MB (custom GLB models are stored inline)
@@ -68,6 +69,16 @@ def lab_version(path: Path) -> str:
         return "new"
 
 
+def read_json(path: Path):
+    """Parse a JSON file. ValueError (with the reason) if it is not valid JSON or not UTF-8."""
+    try:
+        return json.loads(path.read_text("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ValueError("not UTF-8 text") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"not valid JSON (line {exc.lineno}, column {exc.colno})") from exc
+
+
 def atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -82,6 +93,46 @@ def _history_of(lab: str):
     """History copies of exactly this lab (lab "a" must not match lab "a.b")."""
     pat = re.compile(re.escape(lab) + r"\.\d{8}-\d{6}\.json")
     return sorted(f for f in HISTORY_DIR.glob(f"{lab}.*.json") if pat.fullmatch(f.name))
+
+
+_versions = {}  # path -> (mtime_ns, size, format version): no full parse of a big lab on each save
+
+
+def format_version(path: Path):
+    """Format version of a saved lab or library ("version", 1 if missing), or None if there is no
+    readable file. A newer app writes a higher number; an older app must not overwrite that file."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _versions.get(str(path))
+    if hit and hit[0] == key:
+        return hit[1]
+    try:
+        v = read_json(path).get("version", 1)
+    except (ValueError, AttributeError):
+        v = None  # damaged: saving over it is allowed (the history keeps a copy)
+    v = v if isinstance(v, int) and not isinstance(v, bool) else None
+    _versions[str(path)] = (key, v)
+    return v
+
+
+def downgrade_error(path: Path, data: dict):
+    """Message if data has an older format than the file it would replace, else None."""
+    on_disk, incoming = format_version(path), data.get("version", 1)
+    if not isinstance(incoming, int) or isinstance(incoming, bool):
+        incoming = 1
+    if on_disk is not None and incoming < on_disk:
+        return (f"{path.name} has format {on_disk}, written by a newer LabTracer. This page uses format "
+                f"{incoming} and would lose data. Reload the page to use the new version.")
+    return None
+
+
+def keep_library_copy() -> None:
+    if LIBRARY_FILE.exists():
+        LIBRARY_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(LIBRARY_FILE, LIBRARY_HISTORY_DIR / f"library.{time.strftime('%Y%m%d-%H%M%S')}.json")
 
 
 def rotate_history(lab: str, current: Path, force: bool = False) -> None:
@@ -195,12 +246,20 @@ class Handler(SimpleHTTPRequestHandler):
             with _lock:  # file and version must match
                 if not f.exists():
                     return self._error(HTTPStatus.NOT_FOUND, "no such lab")
-                version, doc = lab_version(f), json.loads(f.read_text("utf-8"))
+                version = lab_version(f)
+                try:
+                    doc = read_json(f)
+                except ValueError as exc:
+                    return self._error(HTTPStatus.UNPROCESSABLE_ENTITY, f"{f.name} is damaged: {exc}. "
+                                       f"Older copies are in {HISTORY_DIR.relative_to(ROOT)}.")
             return self._json(doc, headers={"X-LabTracer-Version": version})
         if path == "/api/library":
-            if LIBRARY_FILE.exists():
-                return self._json(json.loads(LIBRARY_FILE.read_text("utf-8")))
-            return self._json({"templates": []})
+            if not LIBRARY_FILE.exists():
+                return self._json({"templates": []})
+            try:
+                return self._json(read_json(LIBRARY_FILE))
+            except ValueError as exc:
+                return self._error(HTTPStatus.UNPROCESSABLE_ENTITY, f"{LIBRARY_FILE.name} is damaged: {exc}")
         if path == "/api/monitor/config":
             c = monitor_cfg()
             return self._json({"agentUrl": c.get("agentUrl", ""), "hasToken": bool(c.get("token")),
@@ -258,14 +317,19 @@ class Handler(SimpleHTTPRequestHandler):
             # X-LabTracer-Base: the version the page loaded ("new" = expects no file).
             # A different version on disk means another window saved first: refuse.
             # X-LabTracer-Force: 1 overwrites anyway and always keeps a history copy.
+            # X-LabTracer-Keep-Copy: 1 always keeps a history copy (first save after a format upgrade).
             base = self.headers.get("X-LabTracer-Base")
             force = self.headers.get("X-LabTracer-Force") == "1"
+            keep = force or self.headers.get("X-LabTracer-Keep-Copy") == "1"
             with _lock:
                 current = lab_version(target)
+                newer = downgrade_error(target, data)  # refused even with force: it would lose data
+                if newer:
+                    return self._json({"error": newer, "newer": True}, HTTPStatus.CONFLICT)
                 if base is not None and not force and base != current:
                     return self._json({"error": "the lab was changed by another window", "conflict": True,
                                        "version": current}, HTTPStatus.CONFLICT)
-                rotate_history(name, target, force=force)
+                rotate_history(name, target, force=keep)
                 atomic_write(target, json.dumps(data, indent=1).encode("utf-8"))
                 version = lab_version(target)
             return self._json({"ok": True, "name": name, "saved": int(time.time()), "version": version})
@@ -292,6 +356,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(data, dict) or "templates" not in data:
                 return self._error(HTTPStatus.BAD_REQUEST, "not a library document")
             with _lock:
+                newer = downgrade_error(LIBRARY_FILE, data)
+                if newer:
+                    return self._json({"error": newer, "newer": True}, HTTPStatus.CONFLICT)
+                if self.headers.get("X-LabTracer-Keep-Copy") == "1":
+                    keep_library_copy()
                 atomic_write(LIBRARY_FILE, json.dumps(data, indent=1).encode("utf-8"))
             return self._json({"ok": True})
         return self._error(HTTPStatus.NOT_FOUND, "unknown endpoint")
