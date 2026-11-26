@@ -472,6 +472,23 @@ Do this only if you change files in `src/`.
 3. Run `npm run build`. This writes `app/app.js`.
 4. Optional: run `npm run dev` to rebuild on each change.
 
+## Tests
+
+The tests are in the `tests` folder. They never use your `data` folder: the server and browser tests start their own copy of the server in a temporary folder.
+
+| Command | What it tests | Needs |
+|---|---|---|
+| `npm test` | Inventory logic: CSV parsing, import, export round trip. | Node.js 18 or later. |
+| `npm run test:py` | server.py guards and save conflicts, ssh_bridge.py, the check agent. | Python 3.8 or later. The agent TLS test also needs the `openssl` command (it is skipped without it). |
+| `npm run test:ui` | The app in a headless browser: inventory, import, undo, two-window saves. | `npm install`, Python 3, and Edge, Chrome or Chromium. |
+| `npm run test:all` | All of the above. | All of the above. |
+
+Without Node.js, run the Python tests with `python -m unittest discover -s tests -v`.
+
+If the browser test does not find your browser, set `LABTRACER_BROWSER` to the path of its executable. On Linux, the tests use `python3`; set `PYTHON` to use a different interpreter.
+
+Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`.
+
 ## Files
 
 | Path | Contents |
@@ -494,5 +511,6 @@ Do this only if you change files in `src/`.
 | `src/inventory.js` | Inventory table, CSV import and export. |
 | `src/sshterm.js` | SSH console in the browser (xterm.js). |
 | `agent/` | The check agent, its systemd unit and its instructions. |
+| `tests/` | Tests: `inventory.test.mjs` (Node), `test_server.py` (Python), `ui.test.mjs` (browser). |
 
 Three.js and xterm.js (MIT licence) are bundled into `app/app.js` and `app/app.css`.

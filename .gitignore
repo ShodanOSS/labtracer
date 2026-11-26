@@ -16,6 +16,7 @@
 !/app/
 !/src/
 !/agent/
+!/tests/
 
 # Never commit these, even inside allowed folders
 /agent/agent.json
