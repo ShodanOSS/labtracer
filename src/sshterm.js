@@ -127,7 +127,10 @@ export class SshManager {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === 'status') { this.setStatus(s, m.text); s.term.writeln(`\x1b[2m${m.text}\x1b[0m`); }
       else if (m.type === 'notice') { s.term.writeln(`\x1b[33m! ${m.text}\x1b[0m`); toast(m.text, 'info', 7000); }
-      else if (m.type === 'connected') { s.up = true; this.setStatus(s, `Connected to ${host} (${engine})`, 'ok'); s.term.focus(); this.sendJson(s, { type: 'resize', cols: s.term.cols, rows: s.term.rows }); }
+      else if (m.type === 'connected') {
+        s.up = true; this.setStatus(s, `Connected to ${host} (${engine})`, 'ok'); s.term.focus(); this.sendJson(s, { type: 'resize', cols: s.term.cols, rows: s.term.rows });
+        if (s.pending) setTimeout(() => { if (s.up && s.pending) { s.term.paste(s.pending); s.pending = null; s.term.focus(); } }, 1500); // after the login banner and prompt
+      }
       else if (m.type === 'hostkey') this.askTrust(s, m);
       else if (m.type === 'error') { s.term.writeln(`\r\n\x1b[31m% ${m.text}\x1b[0m`); this.setStatus(s, m.text, 'err'); toast('SSH: ' + m.text, 'err', 7000); }
       else if (m.type === 'closed') { s.term.writeln(`\r\n\x1b[2m${m.text}\x1b[0m`); s.closedText = m.text; }
@@ -139,6 +142,18 @@ export class SshManager {
       s.closedText = '';
     };
     ws.onerror = () => { if (!s.up) this.setStatus(s, 'The WebSocket to server.py failed.', 'err'); };
+  }
+
+  /** Type text into the device's SSH console without pressing Enter at the end (connects first if needed).
+   *  Shells with bracketed paste (bash, zsh) keep the whole text in the line editor until Enter. */
+  paste(id, text) {
+    const s = this.sessions.get(id);
+    const t = String(text || '').replace(/\s+$/, '');
+    if (!s || !t) return;
+    if (s.up && this.isOpen(id)) { s.term.paste(t); s.term.focus(); return; }
+    s.pending = t;
+    s.term.writeln('\r\n\x1b[33m! The commands are pasted after the connection opens. Check them, then press Enter.\x1b[0m');
+    this.connect(id);
   }
 
   askTrust(s, m) {

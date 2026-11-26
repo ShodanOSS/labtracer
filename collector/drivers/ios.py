@@ -225,3 +225,99 @@ def _cdp(text):
         if dev and intf:
             out.append({"localPort": intf.group(1), "remoteName": dev.group(1), "remotePort": intf.group(2), "remoteMac": ""})
     return out
+
+
+# ---------------------------------------------------------------- remediation
+def _mask(prefix_cidr):
+    import ipaddress
+    n = ipaddress.IPv4Interface(prefix_cidr)
+    return str(n.ip), str(n.netmask)
+
+
+def _route_cmd(o):
+    import ipaddress
+    net = ipaddress.IPv4Network(o["dest"])
+    return f"ip route {net.network_address} {net.netmask} " + (o["via"] if o["via"] else o["dev"])
+
+
+def render(ops):
+    """Validated operations (collector/ops.py) -> (IOS commands, notes)."""
+    cmds, notes = ["configure terminal"], []
+    for o in ops:
+        if o["op"] in ("vlan-add", "vlan-name"):
+            cmds += [f"vlan {o['id']}", f" name {o['name']}", "exit"]
+        elif o["op"] == "vlan-del":
+            cmds.append(f"no vlan {o['id']}")
+    ports = []
+    for o in ops:
+        if "port" in o and o["port"] not in ports:
+            ports.append(o["port"])
+    for port in ports:
+        lines = []
+        for o in ops:
+            if o.get("port") != port:
+                continue
+            op = o["op"]
+            if op == "iface-desc":
+                d = o["desc"].replace("?", "")  # '?' asks the IOS CLI for help
+                lines.append(f" description {d}" if d else " no description")
+            elif op == "iface-enable":
+                lines.append(" no shutdown" if o["enabled"] else " shutdown")
+            elif op == "iface-ip":
+                if o["ip"] == "dhcp":
+                    lines.append(" ip address dhcp")
+                elif o["ip"]:
+                    lines.append(" ip address %s %s" % _mask(o["ip"]))
+                else:
+                    lines.append(" no ip address")
+            elif op == "sw-access":
+                lines += [" switchport mode access", f" switchport access vlan {o['vlan']}"]
+            elif op == "sw-trunk":
+                lines += [" switchport mode trunk", f" switchport trunk native vlan {o['nativeVlan']}",
+                          f" switchport trunk allowed vlan {o['trunkVlans']}"]
+                notes.append("Some switches need \"switchport trunk encapsulation dot1q\" before \"switchport mode trunk\". "
+                             "If the device refuses the mode, add that line in the console.")
+            elif op == "sw-routed":
+                lines.append(" no switchport")
+        cmds += [f"interface {port}", *lines, "exit"]
+    for o in ops:
+        if o["op"] == "route-del":
+            cmds.append("no " + _route_cmd(o))
+    for o in ops:
+        if o["op"] == "route-add":
+            cmds.append(_route_cmd(o))
+    for o in ops:
+        if o["op"] == "hostname":
+            cmds.append(f"hostname {o['name']}")
+    cmds.append("end")
+    return cmds, sorted(set(notes))
+
+
+def apply(sess, cmds, save=False):
+    """Run reviewed commands one by one. Stops at the first command the device refuses.
+    Returns (ok, transcript)."""
+    sh = sess.shell()
+    sh.cmd("terminal length 0")
+    if not sh.privileged:
+        return False, f"{sh.prompt}\n! The login has no privilege 15 (the prompt must end with #). Nothing was changed."
+    log, ok = [], True
+    for c in cmds:
+        before = sh.prompt
+        out = sh.cmd(c.strip(), timeout=60)
+        log.append(f"{before}{c.strip()}")
+        if out.strip():
+            log.append(out.rstrip())
+        if bad(out):
+            ok = False
+            log.append("! Stopped: the device refused this command. The commands before it are applied (running-config only).")
+            if c.strip() != "end":
+                sh.cmd("end")
+            break
+    if ok and save:
+        before = sh.prompt
+        out = sh.cmd("write memory", timeout=120)
+        log += [f"{before}write memory", out.rstrip()]
+        if bad(out) or "OK" not in out:
+            ok = False
+            log.append("! write memory did not report OK.")
+    return ok, "\n".join(x for x in log if x is not None)

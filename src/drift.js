@@ -5,6 +5,12 @@
 //
 // Accept actions get the lab and device at the time they run (after undo/redo the lab is
 // a different object), so they keep ids and values, never object references.
+//
+// An item can also have a `push`: operations (collector/ops.py) that make the device match
+// the model. They are data, not commands: server.py validates them and the device driver
+// renders the commands, which the user reviews before anything runs. `danger` marks
+// changes that can cut the connection (addresses, shutdowns, trunks, default routes):
+// they are never part of "push all".
 import { parseCIDR, intToIp, uid } from './util.js';
 import { makePort, linksOfPort, otherEnd, devById, portById, removePort, createDevice, uniqueName, L3_KINDS, MULTI_LINK } from './model.js';
 import { BUILTIN } from './templates.js';
@@ -19,7 +25,7 @@ export const DRIVERS = [['auto', 'Detect'], ['linux', 'Linux / Proxmox / DD-WRT'
 /** Per-device collection settings (stored only when the user changes them). */
 export const collectConf = d => Object.assign({ enabled: !!d.ssh, driver: 'auto', ignore: [] }, d.collect || {});
 /** Per-lab collection settings. */
-export const labCollectConf = lab => Object.assign({ autoAcceptInventory: false }, lab.collect || {});
+export const labCollectConf = lab => Object.assign({ autoAcceptInventory: false, interval: 0 }, lab.collect || {});
 
 // ---------------------------------------------------------------- names
 const PREFIX = {
@@ -60,17 +66,22 @@ const OOB = /^(ipmi|bmc|idrac|ilo|imm|oob|mgmt-oob)\d*$/i;
 const COMPARED_KINDS = L3_KINDS; // data ports; power, console, USB and video are physical only
 const PORT_KINDS = new Set(['eth', 'sfp', 'wifi', 'vport', 'tunnel', 'svi', 'sub', 'loop']);
 
+/** A push: label for the button, operations, and whether it can cut the connection. */
+const P = (label, ops, danger = false) => ({ label, ops, danger });
+
 const WELL_KNOWN = { 21: 'ftp', 22: 'ssh', 23: 'telnet', 25: 'smtp', 53: 'dns', 80: 'http', 88: 'kerberos', 111: 'rpcbind', 139: 'netbios', 389: 'ldap', 443: 'https', 445: 'smb', 636: 'ldaps', 873: 'rsync', 2049: 'nfs', 3000: 'web', 3306: 'mysql', 3389: 'rdp', 5432: 'postgres', 5900: 'vnc', 8006: 'proxmox', 8080: 'http-alt', 8443: 'https-alt', 9090: 'cockpit', 9100: 'node-exporter' };
 
 // ---------------------------------------------------------------- compare
 /**
  * Differences between device d in the lab (the plan) and facts (the actual state).
- * Returns [{key, area, sev, text, planned, actual, accept?: {label, run(lab, dev)}, inv?, ignored}].
+ * Returns [{key, area, sev, text, planned, actual, accept?: {label, run(lab, dev)}, push?: {label, ops, danger}, inv?, ignored}].
  */
 export function compareDevice(lab, d, facts) {
   if (!facts || !facts.ok) return [];
   const items = [];
-  const add = it => items.push({ planned: '', actual: '', accept: null, inv: false, ...it });
+  const add = it => items.push({ planned: '', actual: '', accept: null, push: null, inv: false, ...it });
+  const mgmt = String(facts.host || '');
+  const isMgmt = addrs => addrs.some(a => String(a).split('/')[0] === mgmt); // the address LabTracer connects to
   const fIfs = (facts.interfaces || []).filter(i => i && i.name);
   const fByName = new Map(fIfs.map(i => [normPort(i.name), i]));
 
@@ -119,7 +130,8 @@ export function compareDevice(lab, d, facts) {
           if (!to) to = dev.ports.find(x => normPort(x.name) === normPort(at.name));
           if (!to) { to = portFromFact(dev, at); dev.ports.push(to); }
           to.ip = want;
-        } } });
+        } },
+        push: bridge || !mine ? null : P(`Move ${want} back to ${mine.name}`, [{ op: 'iface-ip', port: at.name, ip: '', old: [want] }, { op: 'iface-ip', port: mine.name, ip: want, old: [] }], true) });
       continue;
     }
     const other = (mine?.ips || []).map(cidrKey).filter(Boolean);
@@ -138,13 +150,16 @@ export function compareDevice(lab, d, facts) {
     } else if (other.length) {
       other.forEach(x => handledAddr.add(x));
       add({ key: `ip:${p.id}`, area: 'ip', sev: 'error', text: `${p.name} has ${other[0]} on the device, ${want} in the model`, planned: want, actual: other.join(', '),
-        accept: { label: `Use ${other[0]}`, run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.ip = other[0]; } } });
+        accept: { label: `Use ${other[0]}`, run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.ip = other[0]; } },
+        push: P(`Set ${want} on ${mine.name}`, [{ op: 'iface-ip', port: mine.name, ip: want, old: other }], isMgmt(other)) });
     } else if (mine?.dhcp) {
       add({ key: `ip:${p.id}`, area: 'ip', sev: 'error', text: `${p.name} uses DHCP on the device, ${want} in the model`, planned: want, actual: 'dhcp',
-        accept: { label: 'Set to DHCP', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.ip = 'dhcp'; } } });
+        accept: { label: 'Set to DHCP', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.ip = 'dhcp'; } },
+        push: P(`Set ${want} on ${mine.name}`, [{ op: 'iface-ip', port: mine.name, ip: want, old: [] }]) });
     } else {
       add({ key: `ip:${p.id}`, area: 'ip', sev: 'error', text: `${want} (${p.name}) is not configured on the device`, planned: want, actual: 'none',
-        accept: { label: 'Remove the address from the model', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.ip = ''; } } });
+        accept: { label: 'Remove the address from the model', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.ip = ''; } },
+        push: mine ? P(`Add ${want} to ${mine.name}`, [{ op: 'iface-ip', port: mine.name, ip: want, old: [] }]) : null });
     }
   }
   for (const [addr, fi] of actualAddr) {
@@ -153,10 +168,12 @@ export function compareDevice(lab, d, facts) {
     const p = portById(d, pid);
     if (p.ip === 'dhcp') {
       if (!fi.dhcp) add({ key: `ip-static:${p.id}`, area: 'ip', sev: 'info', text: `${p.name} has the static address ${addr}; the model says DHCP`, planned: 'dhcp', actual: addr,
-        accept: { label: `Use ${addr}`, run: (lab, dev) => { const q = portById(dev, pid); if (q) q.ip = addr; } } });
+        accept: { label: `Use ${addr}`, run: (lab, dev) => { const q = portById(dev, pid); if (q) q.ip = addr; } },
+        push: P(`Set ${fi.name} to DHCP`, [{ op: 'iface-ip', port: fi.name, ip: 'dhcp', old: [addr] }], isMgmt([addr])) });
     } else if (!p.ip) {
       add({ key: `ip-new:${p.id}`, area: 'ip', sev: 'warn', text: `${p.name} has ${addr}${fi.dhcp ? ' (DHCP)' : ''}; the model has no address`, planned: 'none', actual: addr,
-        accept: { label: fi.dhcp ? 'Set to DHCP' : `Use ${addr}`, run: (lab, dev) => { const q = portById(dev, pid); if (q) q.ip = fi.dhcp ? 'dhcp' : addr; } } });
+        accept: { label: fi.dhcp ? 'Set to DHCP' : `Use ${addr}`, run: (lab, dev) => { const q = portById(dev, pid); if (q) q.ip = fi.dhcp ? 'dhcp' : addr; } },
+        push: P(`Remove ${addr} from ${fi.name}`, [{ op: 'iface-ip', port: fi.name, ip: '', old: [addr] }], true) });
     } else {
       add({ key: `ip-extra:${p.id}:${addr}`, area: 'ip', sev: 'info', text: `${p.name} also has ${addr} (the model keeps one address per port)`, actual: addr });
     }
@@ -182,7 +199,8 @@ export function compareDevice(lab, d, facts) {
     if (fi.adminUp !== null && fi.adminUp !== undefined && !!p.enabled !== !!fi.adminUp)
       add({ key: `iface-state:${p.id}`, area: 'interface', sev: p.ip || linksOfPort(lab, d.id, p.id).length ? 'warn' : 'info', text: `${p.name} is ${fi.adminUp ? 'enabled' : 'shut down'} on the device, ${p.enabled ? 'enabled' : 'disabled'} in the model`,
         planned: p.enabled ? 'enabled' : 'disabled', actual: fi.adminUp ? 'enabled' : 'shut down',
-        accept: { label: fi.adminUp ? 'Enable in the model' : 'Disable in the model', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.enabled = !!fi.adminUp; } } });
+        accept: { label: fi.adminUp ? 'Enable in the model' : 'Disable in the model', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.enabled = !!fi.adminUp; } },
+        push: P(p.enabled ? `Enable ${fi.name}` : `Shut down ${fi.name}`, [{ op: 'iface-enable', port: fi.name, enabled: !!p.enabled }], !p.enabled) });
     if (fi.mac) {
       const pm = normMac(p.mac);
       if (!pm) add({ key: `mac:${p.id}`, area: 'inventory', sev: 'info', inv: true, text: `${p.name} MAC ${fi.mac} is not in the model`, planned: '', actual: fi.mac,
@@ -192,7 +210,8 @@ export function compareDevice(lab, d, facts) {
     }
     if (fi.desc && fi.desc !== p.desc)
       add({ key: `desc:${p.id}`, area: 'interface', sev: 'info', text: `${p.name} description is "${fi.desc}" on the device`, planned: p.desc, actual: fi.desc,
-        accept: { label: 'Use the device description', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.desc = fi.desc; } } });
+        accept: { label: 'Use the device description', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.desc = fi.desc; } },
+        push: P('Set the model description', [{ op: 'iface-desc', port: fi.name, desc: p.desc || '' }]) });
     if (fi.operUp === false && fi.adminUp !== false && p.enabled && linksOfPort(lab, d.id, p.id).some(l => l.medium !== 'power'))
       add({ key: `down:${p.id}`, area: 'link', sev: 'warn', text: `${p.name} has a cable in the model, but the link is down`, planned: 'up', actual: 'down' });
     switchport(add, d, p, fi);
@@ -236,7 +255,8 @@ function identity(add, lab, d, facts) {
   const real = String(facts.system.hostname).split('.')[0];
   const taken = lab.devices.some(x => x.id !== d.id && x.name.toLowerCase() === hn);
   add({ key: 'hostname', area: 'identity', sev: 'warn', text: `The device calls itself ${real}`, planned: d.name, actual: real,
-    accept: taken ? null : { label: `Rename to ${real}`, run: (lab, dev) => { dev.name = real; } } });
+    accept: taken ? null : { label: `Rename to ${real}`, run: (lab, dev) => { dev.name = real; } },
+    push: P(`Set hostname ${d.name}`, [{ op: 'hostname', name: d.name }]) });
 }
 
 function inventory(add, d, facts) {
@@ -264,20 +284,28 @@ function inventory(add, d, facts) {
 function switchport(add, d, p, fi) {
   if (!d.l2 || !fi.mode || !['eth', 'sfp'].includes(p.kind)) return;
   const set = (label, patch) => ({ label, run: (lab, dev) => { const q = portById(dev, p.id); if (q) Object.assign(q, patch); } });
+  const port = fi.name;
+  const trunk = () => ({ op: 'sw-trunk', port, nativeVlan: +p.nativeVlan || 1, trunkVlans: String(p.trunkVlans || 'all') });
   if ((p.mode || 'access') !== fi.mode) {
+    const want = p.mode || 'access';
+    const op = want === 'trunk' ? trunk() : want === 'routed' ? { op: 'sw-routed', port } : { op: 'sw-access', port, vlan: +p.vlan || 1 };
     const patch = { mode: fi.mode };
     if (fi.mode === 'access') patch.vlan = fi.vlan || 1;
     if (fi.mode === 'trunk') Object.assign(patch, { nativeVlan: fi.nativeVlan || 1, trunkVlans: fi.trunkVlans || 'all' });
-    add({ key: `sw-mode:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} is ${fi.mode} on the device, ${p.mode || 'access'} in the model`, planned: p.mode, actual: fi.mode, accept: set(`Make it ${fi.mode}`, patch) });
+    add({ key: `sw-mode:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} is ${fi.mode} on the device, ${p.mode || 'access'} in the model`, planned: p.mode, actual: fi.mode, accept: set(`Make it ${fi.mode}`, patch),
+      push: P(`Make it ${want} on the device`, [op], true) });
     return;
   }
   if (fi.mode === 'access' && fi.vlan && +p.vlan !== +fi.vlan)
-    add({ key: `sw-vlan:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} is in VLAN ${fi.vlan} on the device, VLAN ${p.vlan} in the model`, planned: String(p.vlan), actual: String(fi.vlan), accept: set(`Use VLAN ${fi.vlan}`, { vlan: fi.vlan }) });
+    add({ key: `sw-vlan:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} is in VLAN ${fi.vlan} on the device, VLAN ${p.vlan} in the model`, planned: String(p.vlan), actual: String(fi.vlan), accept: set(`Use VLAN ${fi.vlan}`, { vlan: fi.vlan }),
+      push: P(`Set VLAN ${p.vlan}`, [{ op: 'sw-access', port, vlan: +p.vlan || 1 }]) });
   if (fi.mode === 'trunk') {
     if (fi.nativeVlan && +p.nativeVlan !== +fi.nativeVlan)
-      add({ key: `sw-native:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} native VLAN is ${fi.nativeVlan} on the device, ${p.nativeVlan} in the model`, planned: String(p.nativeVlan), actual: String(fi.nativeVlan), accept: set(`Use native VLAN ${fi.nativeVlan}`, { nativeVlan: fi.nativeVlan }) });
+      add({ key: `sw-native:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} native VLAN is ${fi.nativeVlan} on the device, ${p.nativeVlan} in the model`, planned: String(p.nativeVlan), actual: String(fi.nativeVlan), accept: set(`Use native VLAN ${fi.nativeVlan}`, { nativeVlan: fi.nativeVlan }),
+        push: P(`Set native VLAN ${p.nativeVlan}`, [trunk()], true) });
     if (fi.trunkVlans && vlanKey(p.trunkVlans) !== vlanKey(fi.trunkVlans))
-      add({ key: `sw-trunk:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} carries VLANs ${fi.trunkVlans} on the device, ${p.trunkVlans} in the model`, planned: p.trunkVlans, actual: fi.trunkVlans, accept: set('Use the device VLAN list', { trunkVlans: fi.trunkVlans }) });
+      add({ key: `sw-trunk:${p.id}`, area: 'switchport', sev: 'warn', text: `${p.name} carries VLANs ${fi.trunkVlans} on the device, ${p.trunkVlans} in the model`, planned: p.trunkVlans, actual: fi.trunkVlans, accept: set('Use the device VLAN list', { trunkVlans: fi.trunkVlans }),
+        push: P('Set the model VLAN list', [trunk()], true) });
   }
 }
 
@@ -287,12 +315,15 @@ function vlans(add, d, facts) {
   const plan = new Map((d.vlans || []).map(v => [+v.id, v.name || '']));
   for (const [id, name] of plan) {
     if (!act.has(id)) add({ key: `vlan-missing:${id}`, area: 'vlan', sev: 'warn', text: `VLAN ${id} (${name}) is not on the device`, planned: `${id} ${name}`, actual: 'missing',
-      accept: { label: 'Remove the VLAN from the model', run: (lab, dev) => { dev.vlans = dev.vlans.filter(v => +v.id !== id); } } });
+      accept: { label: 'Remove the VLAN from the model', run: (lab, dev) => { dev.vlans = dev.vlans.filter(v => +v.id !== id); } },
+      push: P(`Create VLAN ${id}`, [{ op: 'vlan-add', id, name: name || `VLAN${id}` }]) });
     else if (id !== 1 && act.get(id) && act.get(id) !== name) add({ key: `vlan-name:${id}`, area: 'vlan', sev: 'info', text: `VLAN ${id} is called ${act.get(id)} on the device, ${name} in the model`, planned: name, actual: act.get(id),
-      accept: { label: `Rename to ${act.get(id)}`, run: (lab, dev) => { const v = dev.vlans.find(x => +x.id === id); if (v) v.name = act.get(id); } } });
+      accept: { label: `Rename to ${act.get(id)}`, run: (lab, dev) => { const v = dev.vlans.find(x => +x.id === id); if (v) v.name = act.get(id); } },
+      push: name ? P(`Name it ${name}`, [{ op: 'vlan-name', id, name }]) : null });
   }
   for (const [id, name] of act) if (!plan.has(id)) add({ key: `vlan-extra:${id}`, area: 'vlan', sev: 'warn', text: `VLAN ${id} (${name}) is on the device but not in the model`, planned: 'missing', actual: `${id} ${name}`,
-    accept: { label: 'Add the VLAN to the model', run: (lab, dev) => { if (!dev.vlans.some(v => +v.id === id)) { dev.vlans.push({ id, name }); dev.vlans.sort((a, b) => a.id - b.id); } } } });
+    accept: { label: 'Add the VLAN to the model', run: (lab, dev) => { if (!dev.vlans.some(v => +v.id === id)) { dev.vlans.push({ id, name }); dev.vlans.sort((a, b) => a.id - b.id); } } },
+    push: id === 1 ? null : P(`Delete VLAN ${id}`, [{ op: 'vlan-del', id }], true) });
 }
 
 function routes(add, d, facts) {
@@ -300,15 +331,19 @@ function routes(add, d, facts) {
   const act = new Map(facts.routes.map(r => [destKey(r.dest), r]));
   const plan = new Map((d.routes || []).map((r, i) => [destKey(r.dest), { ...r, i }]));
   const hop = r => r.via || (r.dev ? `dev ${r.dev}` : '');
+  const rop = (op, dest, r) => ({ op, dest, via: r.via || '', dev: r.via ? '' : (r.dev || '') });
   for (const [dest, r] of plan) {
     const a = act.get(dest);
     if (!a) add({ key: `route-missing:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} via ${hop(r) || '?'} is not on the device`, planned: `${dest} ${hop(r)}`, actual: 'missing',
-      accept: { label: 'Remove the route from the model', run: (lab, dev) => { dev.routes = dev.routes.filter(x => destKey(x.dest) !== dest); } } });
+      accept: { label: 'Remove the route from the model', run: (lab, dev) => { dev.routes = dev.routes.filter(x => destKey(x.dest) !== dest); } },
+      push: hop(r) ? P('Add the route on the device', [rop('route-add', dest, r)]) : null });
     else if ((a.via || '') !== (r.via || '') && !(!r.via && !a.via)) add({ key: `route-via:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} goes via ${hop(a)} on the device, via ${hop(r)} in the model`, planned: hop(r), actual: hop(a),
-      accept: { label: `Use ${hop(a)}`, run: (lab, dev) => { const x = dev.routes.find(y => destKey(y.dest) === dest); if (x) { x.via = a.via || ''; x.dev = a.via ? '' : (a.dev || ''); } } } });
+      accept: { label: `Use ${hop(a)}`, run: (lab, dev) => { const x = dev.routes.find(y => destKey(y.dest) === dest); if (x) { x.via = a.via || ''; x.dev = a.via ? '' : (a.dev || ''); } } },
+      push: hop(r) ? P(`Route via ${hop(r)}`, [rop('route-del', dest, a), rop('route-add', dest, r)], dest === '0.0.0.0/0') : null });
   }
   for (const [dest, a] of act) if (!plan.has(dest)) add({ key: `route-extra:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} via ${hop(a)} is on the device but not in the model`, planned: 'missing', actual: `${dest} ${hop(a)}`,
-    accept: { label: 'Add the route to the model', run: (lab, dev) => { if (!dev.routes.some(x => destKey(x.dest) === dest)) dev.routes.push({ dest, via: a.via || '', dev: a.via ? '' : (a.dev || '') }); } } });
+    accept: { label: 'Add the route to the model', run: (lab, dev) => { if (!dev.routes.some(x => destKey(x.dest) === dest)) dev.routes.push({ dest, via: a.via || '', dev: a.via ? '' : (a.dev || '') }); } },
+    push: P('Delete the route on the device', [rop('route-del', dest, a)], dest === '0.0.0.0/0') });
 }
 
 function findRemote(lab, d, nb) {
@@ -416,4 +451,6 @@ export function driftCounts(items) {
   return c;
 }
 /** Items whose accept only fills in inventory facts (serial, model, vendor, MAC, OS). */
+/** Items whose push can not cut the connection ("push all"). */
+export const safePushes = items => items.filter(it => it.push && !it.push.danger && !it.ignored);
 export const inventoryFacts = items => items.filter(it => it.inv && it.accept && !it.ignored);

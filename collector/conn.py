@@ -39,15 +39,16 @@ def _policy(trust_fp):
 class Session:
     """One SSH connection to a device."""
 
-    def __init__(self, client):
+    def __init__(self, client, host=""):
         self.client = client
+        self.host = host
         self._shell = None
 
     @classmethod
     def open(cls, p, password=None, trust=None):
         if ssh_bridge.load_paramiko() is None:
             raise ValueError("paramiko is not installed. Run: pip install paramiko")
-        return cls(ssh_bridge.open_client(p, password, _policy(trust)))
+        return cls(ssh_bridge.open_client(p, password, _policy(trust)), p["host"])
 
     def run(self, cmd, timeout=CMD_TIMEOUT):
         """Run one command (exec channel, no pty). Returns (exit status, stdout, stderr) as text."""
@@ -137,8 +138,8 @@ class Shell:
                     return text
             elif self.prompt and tail.strip() == self.prompt:
                 return text
-            elif self.prompt and tail.strip().startswith(self.base) and tail.strip()[-1:] in ">#" and time.time() - quiet_since > 0.5:
-                self.prompt = tail.strip()  # mode change, for example config mode
+            elif self.prompt and PROMPT_RE.fullmatch(tail.strip()) and time.time() - quiet_since > 0.7:
+                self.prompt = tail.strip()  # a new prompt: config mode, or a new hostname
                 return text
         if initial:
             raise TimeoutError("no CLI prompt from the device")

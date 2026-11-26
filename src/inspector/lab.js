@@ -34,6 +34,7 @@ export class LabPanel {
     // monitoring
     ap(body, h('h4', null, 'Monitoring agent'), this.monitorSection());
     ap(body, h('h4', null, 'Drift: model vs devices'), this.driftSection());
+    ap(body, h('h4', null, 'Nagios'), this.nagiosSection());
 
     // unplaced
     // deployed kit with no room; spares, parts and items with a storage location are not "missing"

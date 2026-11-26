@@ -218,7 +218,7 @@ class JobTest(unittest.TestCase):
         out = (FIX / "linux-pve.txt").read_text("utf-8")
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(store, "OBS_DIR", Path(tmp)), \
                 mock.patch.object(ssh_bridge, "validate", side_effect=lambda d: {**d, "auth": "key", "host": "10.0.0.5"}), \
-                mock.patch.object(collector.Session, "open", side_effect=lambda *a, **k: mock.Mock(run=lambda *x, **y: (0, out, ""))):
+                mock.patch.object(collector.Session, "open", side_effect=lambda *a, **k: mock.Mock(run=lambda *x, **y: (0, out, ""), host="10.0.0.5")):
             snap = collector.start("lab", {"devices": [{"id": "dev_1", "driver": "linux"}]})
             for _ in range(200):
                 snap = collector.snapshot(snap["id"])

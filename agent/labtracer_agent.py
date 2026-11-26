@@ -5,6 +5,10 @@ A small, read-only monitoring agent. Standard library only. Runs checks
 (ICMP ping, TCP connect) against the targets LabTracer sends it, and
 reports results over HTTP(S).
 
+With "source": "nagios" it runs no checks itself: it reads the results of a
+Nagios (or Naemon, Icinga 1, Checkmk) server on the same host, read-only, from
+status.dat or a Livestatus socket, and reports them in the same format.
+
 Design rules (it is meant to be safe to run on a domain controller):
   * Runs as an unprivileged user. No shell commands are built from input.
   * Only two kinds of check exist: ping and TCP connect. Targets can not
@@ -13,6 +17,7 @@ Design rules (it is meant to be safe to run on a domain controller):
     non-loopback address. The agent refuses to start otherwise.
   * Optional TLS with your own certificate (stdlib ssl).
   * No data is written except its own targets file.
+  * Nagios source: it only reads status.dat, or sends GET queries to Livestatus.
 """
 
 import argparse
@@ -34,7 +39,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.0"
+VERSION = "1.1"
 MAX_TARGETS = 500
 MAX_CHECKS_PER_TARGET = 20
 MAX_BODY = 1024 * 1024
@@ -51,6 +56,10 @@ DEFAULTS = {
     "targets_file": "targets.json",
     "tls_cert": "",
     "tls_key": "",
+    "source": "checks",           # "checks": ping and TCP connect; "nagios": read the results of Nagios
+    "nagios_status": "/usr/local/nagios/var/status.dat",
+    "livestatus": "",             # path of a Livestatus socket; used instead of status.dat when set
+    "nagios_max_age": 300,        # seconds: an older status.dat means Nagios is not running
 }
 
 
@@ -191,6 +200,131 @@ def clean_targets(raw):
     return out
 
 
+# ---------------------------------------------------------------- Nagios (source "nagios")
+NAGIOS_HOST_STATE = {0: "UP", 1: "DOWN", 2: "UNREACHABLE"}
+NAGIOS_SVC_STATE = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
+MAX_STATUS_BYTES = 64 * 1024 * 1024
+NAG_ILLEGAL = re.compile(r"""[~!$%^&*|'"<>?,()=;\\\s`]+""")
+
+
+def nag_name(s):
+    """The host name LabTracer gives a device in its Nagios export (src/nagios.js nagName)."""
+    n = re.sub(r"-+", "-", NAG_ILLEGAL.sub("-", str(s or ""))).strip("-")
+    return n or "unnamed"
+
+
+def _int(v, default=0):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_status_dat(text):
+    """Nagios status.dat -> (created, {host: {state, checked, output, since, vars}}, {host: [service, ...]})."""
+    created, hosts, services = 0, {}, {}
+    block, cur = None, None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if block is None:
+            if s.endswith("{"):
+                block, cur = s[:-1].strip(), {}
+            continue
+        if s == "}":
+            if block == "info":
+                created = _int(cur.get("created"))
+            elif block == "hoststatus" and cur.get("host_name"):
+                hosts[cur["host_name"]] = {
+                    "state": _int(cur.get("current_state"), 3), "checked": cur.get("has_been_checked") == "1",
+                    "output": cur.get("plugin_output", ""), "since": _int(cur.get("last_state_change")),
+                    # custom variables are written as _NAME=modified;value
+                    "vars": {k[1:].upper(): v.split(";", 1)[-1] for k, v in cur.items() if k.startswith("_")}}
+            elif block == "servicestatus" and cur.get("host_name"):
+                services.setdefault(cur["host_name"], []).append({
+                    "desc": cur.get("service_description", ""), "state": _int(cur.get("current_state"), 3),
+                    "checked": cur.get("has_been_checked") == "1", "output": cur.get("plugin_output", ""),
+                    "since": _int(cur.get("last_state_change"))})
+            block, cur = None, None
+            continue
+        if block in ("info", "hoststatus", "servicestatus"):
+            k, _, v = s.partition("=")
+            cur[k] = v
+    return created, hosts, services
+
+
+def _livestatus(path, query, timeout=5.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(path)
+        s.sendall(query.encode())
+        s.shutdown(socket.SHUT_WR)
+        data = bytearray()
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > MAX_STATUS_BYTES:
+                raise ValueError("Livestatus answer too large")
+    finally:
+        s.close()
+    return json.loads(data.decode("utf-8", "replace"))
+
+
+HOSTS_QUERY = ("GET hosts\nColumns: name state has_been_checked plugin_output last_state_change "
+               "custom_variable_names custom_variable_values\nOutputFormat: json\n\n")
+SERVICES_QUERY = ("GET services\nColumns: host_name description state has_been_checked plugin_output last_state_change\n"
+                  "OutputFormat: json\n\n")
+
+
+def query_livestatus(path):
+    """Read-only GET queries to a Livestatus socket. Same result shape as parse_status_dat."""
+    hosts, services = {}, {}
+    for name, state, checked, output, since, vnames, vvalues in _livestatus(path, HOSTS_QUERY):
+        hosts[name] = {"state": _int(state, 3), "checked": bool(checked), "output": output or "", "since": _int(since),
+                       "vars": {str(k).upper(): str(v) for k, v in zip(vnames or [], vvalues or [])}}
+    for host, desc, state, checked, output, since in _livestatus(path, SERVICES_QUERY):
+        services.setdefault(host, []).append({"desc": desc, "state": _int(state, 3), "checked": bool(checked),
+                                              "output": output or "", "since": _int(since)})
+    return int(time.time()), hosts, services
+
+
+def read_nagios(cfg):
+    if cfg.get("livestatus"):
+        return query_livestatus(cfg["livestatus"])
+    path = Path(cfg["nagios_status"])
+    if path.stat().st_size > MAX_STATUS_BYTES:
+        raise ValueError(f"{path} is larger than {MAX_STATUS_BYTES // 1024 // 1024} MB")
+    return parse_status_dat(path.read_text("utf-8", "replace"))
+
+
+def nagios_device(hst, svcs, name):
+    """(state, Nagios host state, checks) of one device from a Nagios host and its services."""
+    nstate = NAGIOS_HOST_STATE.get(hst["state"], "UNKNOWN") if hst["checked"] else "PENDING"
+    host_ok = hst["checked"] and hst["state"] == 0
+    checks = [{"type": "nagios", "host": name, "label": "host", "state": nstate, "ok": host_ok, "ms": None,
+               "err": "" if host_ok else (hst["output"] or nstate), "output": hst["output"], "since": hst["since"]}]
+    for sv in svcs:
+        sstate = NAGIOS_SVC_STATE.get(sv["state"], "UNKNOWN") if sv["checked"] else "PENDING"
+        ok = sv["checked"] and sv["state"] == 0
+        checks.append({"type": "nagios", "host": name, "label": sv["desc"], "state": sstate, "ok": ok, "ms": None,
+                       "err": "" if ok else (sv["output"] or sstate), "output": sv["output"], "since": sv["since"]})
+    if not hst["checked"]:
+        state = "unknown"
+    elif hst["state"] == 1:
+        state = "down"
+    elif hst["state"] != 0:
+        state = "unknown"  # UNREACHABLE: a parent is down, so the state of this host is not known
+    elif any(not c["ok"] and c["state"] != "PENDING" for c in checks[1:]):
+        state = "degraded"
+    else:
+        state = "up"
+    return state, nstate, checks
+
+
 # ---------------------------------------------------------------- agent state
 class Agent:
     def __init__(self, cfg, state_dir: Path):
@@ -200,6 +334,8 @@ class Agent:
         self.targets = []
         self.results = {}   # id -> device status
         self.last_run = 0
+        self.error = ""          # a source problem shown in LabTracer (for example an old status.dat)
+        self.nagios_hosts = []   # all host names in Nagios (source "nagios")
         self.wake = threading.Event()
         if self.targets_path.exists():
             try:
@@ -220,6 +356,8 @@ class Agent:
         return len(targets)
 
     def run_once(self):
+        if self.cfg.get("source") == "nagios":
+            return self.run_nagios()
         with self.lock:
             targets = list(self.targets)
         jobs = [(t, i, c) for t in targets for i, c in enumerate(t["checks"])]
@@ -275,6 +413,44 @@ class Agent:
                 }
             self.last_run = now
 
+    def run_nagios(self):
+        """Map Nagios hosts to LabTracer targets: by the _LABTRACER_ID custom variable of the
+        LabTracer export, else by host name."""
+        now = int(time.time())
+        try:
+            created, hosts, services = read_nagios(self.cfg)
+        except (OSError, ValueError) as exc:
+            with self.lock:
+                self.error = f"can not read the Nagios status: {exc}"
+                self.last_run = now
+            return
+        age = now - created if created else 0
+        err = f"the Nagios status is {age} s old: is Nagios running?" if age > float(self.cfg["nagios_max_age"]) else ""
+        by_id = {h["vars"]["LABTRACER_ID"]: n for n, h in hosts.items() if h["vars"].get("LABTRACER_ID")}
+        lower = {n.lower(): n for n in hosts}
+        with self.lock:
+            results = {}
+            for t in self.targets:
+                name = by_id.get(t["id"]) or lower.get(nag_name(t["name"]).lower()) or lower.get(t["name"].lower())
+                prev = self.results.get(t["id"], {})
+                if name:
+                    state, nstate, checks = nagios_device(hosts[name], services.get(name, []), name)
+                    started = hosts[name]["since"] or now
+                else:
+                    state, nstate, checks, started = "unknown", "not in Nagios", [], now
+                hist = prev.get("history", [])
+                hist.append([now, sum(1 for c in checks if c["ok"]), len(checks), None])
+                if prev.get("state") == state:
+                    since = prev.get("since", started)
+                else:
+                    since = started if state in ("up", "down") else now
+                results[t["id"]] = {"name": t["name"], "state": state, "nagiosState": nstate, "nagiosHost": name or "",
+                                    "checks": checks, "history": hist[-int(self.cfg["history"]):], "since": since}
+            self.results = results
+            self.nagios_hosts = sorted(hosts)
+            self.error = err
+            self.last_run = now
+
     def loop(self):
         while True:
             t0 = time.time()
@@ -289,6 +465,8 @@ class Agent:
         with self.lock:
             return {"agent": "labtracer-agent", "version": VERSION, "host": socket.gethostname(),
                     "interval": self.cfg["interval"], "generated": self.last_run, "now": int(time.time()), "targets": len(self.targets),
+                    "source": self.cfg.get("source") or "checks", "error": self.error,
+                    "nagiosHosts": self.nagios_hosts if self.cfg.get("source") == "nagios" else None,
                     "devices": self.results}
 
 

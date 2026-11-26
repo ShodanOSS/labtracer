@@ -10,6 +10,7 @@ import { FilesTab } from './inspector/files.js';
 import { ConsoleTab } from './inspector/console.js';
 import { MonitorPanels } from './inspector/monitor.js';
 import { DriftTab } from './inspector/drift.js';
+import { NagiosPanel } from './inspector/nagios.js';
 import { LinkPanel } from './inspector/link.js';
 import { LabPanel } from './inspector/lab.js';
 
@@ -89,4 +90,4 @@ export class Inspector {
   }
 }
 
-mixin(Inspector, GeneralTab, PhysicalTab, PortsTab, RoutingTab, FilesTab, ConsoleTab, MonitorPanels, DriftTab, LinkPanel, LabPanel);
+mixin(Inspector, GeneralTab, PhysicalTab, PortsTab, RoutingTab, FilesTab, ConsoleTab, MonitorPanels, DriftTab, NagiosPanel, LinkPanel, LabPanel);

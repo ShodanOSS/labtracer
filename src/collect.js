@@ -1,10 +1,12 @@
-// Collector client. Asks server.py to read devices over SSH (collector/, read-only on the
-// devices) and keeps the facts of the open lab. The drift report (src/drift.js) compares
-// those facts with the model.
+// Collector client. Asks server.py to read devices over SSH (collector/) and keeps the
+// facts of the open lab; the drift report (src/drift.js) compares them with the model.
+// It also pushes reviewed changes to a device (remediation).
 //
 //   GUI --POST /api/collect/<lab>--> server.py --SSH--> devices
-//       <--GET /api/collect/jobs/<id>  (progress)
+//       <-- /api/events: job progress and new facts (HTTP polling while the WebSocket is down)
 //       <--GET /api/observed/<lab>     (facts, kept in data/observed/<lab>/)
+//   GUI --POST /api/remediate/<lab>/plan {device, ops}  -> commands to review
+//       --POST /api/remediate/apply {planId, save}      -> job: apply, then collect again
 import { h } from './util.js';
 import { devById, isDeployed } from './model.js';
 import { modal, toast } from './dialogs.js';
@@ -12,17 +14,28 @@ import { sshConf, sshHost, askPassword } from './sshterm.js';
 import { compareDevice, collectConf, labCollectConf, inventoryFacts, driftCounts } from './drift.js';
 
 const HDR = { 'Content-Type': 'application/json', 'X-LabTracer': '1' };
-const POLL_MS = 1000;
+const POLL_MS = 1000;        // job polling without the events WebSocket
+const SAFETY_POLL_MS = 5000; // with it: an HTTP check now and then, in case an event was missed
 const MAX_WAIT_MS = 10 * 60 * 1000;
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function postJson(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: HDR, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
 
 export class Collector {
   constructor(app) {
     this.app = app;
-    this.facts = new Map();  // device id -> facts
-    this.state = new Map();  // device id -> {state, error, errors}: the last run
+    this.facts = new Map();   // device id -> facts
+    this.state = new Map();   // device id -> {state, error, errors}: the last run
+    this.waiters = new Map(); // job id -> fn(snapshot)
     this.labName = null;
     this.running = false;
+    this.lastAuto = 0;
+    app.events?.on('job', m => this.waiters.get(m.job?.id)?.(m.job));
+    app.events?.on('facts', m => { if (m.lab === this.labName) this.fetchFacts(m.lab, m.dev).then(() => this.changed()); });
   }
   get available() { return this.app.store.mode === 'server'; }
 
@@ -36,6 +49,7 @@ export class Collector {
       const j = await r.json();
       if (this.labName !== name) return; // another lab was opened meanwhile
       for (const [id, f] of Object.entries(j.devices || {})) this.facts.set(id, f);
+      this.lastAuto = Math.max(0, ...[...this.facts.values()].map(f => (f.collected || 0) * 1000));
     } catch { /* nothing collected yet */ }
     this.changed();
   }
@@ -56,18 +70,45 @@ export class Collector {
     return { id: d.id, name: d.name, host: sshHost(d), port: c.port, user: c.user, auth: c.auth, keyFile: c.keyFile, legacy: c.legacy, driver: collectConf(d).driver || 'auto' };
   }
 
-  /** Read devices; resolves when the run (and host key retries) is over. */
-  async run(devs, trust = {}) {
+  /** The next snapshot of a job: from /api/events, or from an HTTP check after a timeout. */
+  waitJob(id) {
+    return new Promise((resolve, reject) => {
+      const done = snap => { clearTimeout(t); this.waiters.delete(id); resolve(snap); };
+      const t = setTimeout(async () => {
+        this.waiters.delete(id);
+        try {
+          const r = await fetch(`/api/collect/jobs/${encodeURIComponent(id)}`, { cache: 'no-store' });
+          if (!r.ok) throw new Error('the server lost the job (was server.py restarted?)');
+          resolve(await r.json());
+        } catch (e) { reject(e); }
+      }, this.app.events?.connected ? SAFETY_POLL_MS : POLL_MS);
+      this.waiters.set(id, done);
+    });
+  }
+  async follow(job) {
+    const end = Date.now() + MAX_WAIT_MS;
+    while (!job.done) {
+      if (Date.now() > end) throw new Error('the job takes too long');
+      this.absorb(job); this.changed();
+      job = await this.waitJob(job.id);
+    }
+    this.absorb(job);
+    return job;
+  }
+
+  /** Read devices; resolves when the run (and host key retries) is over.
+   *  opts.auto: a scheduled run (no dialogs; key-login devices only). */
+  async run(devs, trust = {}, opts = {}) {
     if (!this.available) { toast('Collect needs server.py', 'warn'); return; }
-    if (this.running) { toast('A collection is already running', 'warn'); return; }
+    if (this.running) { if (!opts.auto) toast('A collection is already running', 'warn'); return; }
     const lab = this.labName;
     const noHost = devs.filter(d => !sshHost(d));
     for (const d of noHost) this.state.set(d.id, { state: 'error', error: 'No address: set the SSH host in the Console tab, or an IP in the Ports tab.' });
     devs = devs.filter(d => sshHost(d));
-    if (!devs.length) { this.changed(); if (noHost.length) toast('No address to connect to', 'err'); return; }
+    if (!devs.length) { this.changed(); if (noHost.length && !opts.auto) toast('No address to connect to', 'err'); return; }
     let password = null;
     const pwDevs = devs.filter(d => sshConf(d).auth === 'password');
-    if (pwDevs.length) {
+    if (pwDevs.length && !opts.auto) {
       password = await askPassword(pwDevs.length === 1 ? `${sshConf(pwDevs[0]).user ? sshConf(pwDevs[0]).user + '@' : ''}${sshHost(pwDevs[0])}` : `${pwDevs.length} devices with password login`,
         'The password goes to server.py for this one collection run. It is not saved.');
       if (password === null) return;
@@ -77,24 +118,14 @@ export class Collector {
     this.changed();
     let job;
     try {
-      const r = await fetch(`/api/collect/${encodeURIComponent(lab)}`, { method: 'POST', headers: HDR, body: JSON.stringify({ devices: devs.map(d => this.params(d)), password, trust }) });
+      job = await postJson(`/api/collect/${encodeURIComponent(lab)}`, { devices: devs.map(d => this.params(d)), password, trust });
       password = null;
-      job = await r.json();
-      if (!r.ok) throw new Error(job.error || r.statusText);
-      const end = Date.now() + MAX_WAIT_MS;
-      while (!job.done && Date.now() < end) {
-        this.absorb(job); this.changed();
-        await sleep(POLL_MS);
-        const p = await fetch(`/api/collect/jobs/${encodeURIComponent(job.id)}`, { cache: 'no-store' });
-        if (!p.ok) throw new Error('the server lost the job (was server.py restarted?)');
-        job = await p.json();
-      }
+      job = await this.follow(job);
     } catch (e) {
       password = null;
       for (const d of devs) if (!['done', 'error'].includes(this.state.get(d.id)?.state)) this.state.set(d.id, { state: 'error', error: e.message });
-      this.running = false; this.changed(); toast('Collect: ' + e.message, 'err', 6000); return;
+      this.running = false; this.changed(); if (!opts.auto) toast('Collect: ' + e.message, 'err', 6000); return;
     }
-    this.absorb(job);
     const done = Object.entries(job.devices).filter(([, v]) => v.state === 'done').map(([id]) => id);
     await Promise.all(done.map(id => this.fetchFacts(lab, id)));
     this.running = false;
@@ -102,8 +133,8 @@ export class Collector {
     this.autoAccept(done);
     this.changed();
     const errs = Object.values(job.devices).filter(v => v.state === 'error').length;
-    toast(`Collected ${done.length} device(s)${errs ? `, ${errs} failed` : ''}`, errs ? 'warn' : 'ok', 3500);
-    // unknown host keys: ask, then read those devices again
+    if (!opts.auto || errs) toast(`${opts.auto ? 'Scheduled collect: ' : 'Collected '}${done.length} device(s)${errs ? `, ${errs} failed` : ''}`, errs ? 'warn' : 'ok', 3500);
+    if (opts.auto) return; // host key questions wait for a manual run
     const retry = {}; const again = [];
     for (const [id, v] of Object.entries(job.devices)) {
       if (v.state !== 'hostkey') continue;
@@ -113,7 +144,18 @@ export class Collector {
     if (again.length) await this.run(again, retry);
   }
 
+  /** Called every minute: the scheduled collection of the lab panel (key-login devices only). */
+  tick() {
+    if (!this.available || this.running || !this.app.lab) return;
+    const every = (+labCollectConf(this.app.lab).interval || 0) * 60000;
+    if (every <= 0 || Date.now() - this.lastAuto < every) return;
+    this.lastAuto = Date.now();
+    const devs = this.candidates().filter(d => sshConf(d).auth !== 'password');
+    if (devs.length) this.run(devs, {}, { auto: true });
+  }
+
   absorb(job) {
+    if (job.kind && job.kind !== 'collect') return;
     for (const [id, v] of Object.entries(job.devices || {})) this.state.set(id, v);
   }
   async fetchFacts(lab, id) {
@@ -121,7 +163,7 @@ export class Collector {
       const r = await fetch(`/api/observed/${encodeURIComponent(lab)}/${encodeURIComponent(id)}`, { cache: 'no-store' });
       if (!r.ok) return;
       const j = await r.json();
-      if (this.labName === lab) { this.facts.set(id, j.facts); this.configs ||= new Map(); this.configs.set(id, j.configs || []); }
+      if (this.labName === lab) this.facts.set(id, j.facts);
     } catch { /* keep the old facts */ }
   }
 
@@ -149,6 +191,68 @@ export class Collector {
     if (on) ign.add(key); else ign.delete(key);
     d.collect = { ...c, ignore: [...ign] };
     this.app.commit(on ? 'Ignore drift item' : 'Stop ignoring drift item', { dev: d.id });
+  }
+
+  // ---------------------------------------------------------------- push the plan to the device
+  /** Ask server.py to render the commands for these items, then show them for review. */
+  async reviewPush(d, items) {
+    items = items.filter(it => it.push);
+    if (!items.length) return;
+    let plan;
+    try { plan = await postJson(`/api/remediate/${encodeURIComponent(this.labName)}/plan`, { device: this.params(d), ops: items.flatMap(it => it.push.ops) }); }
+    catch (e) { toast('Push: ' + e.message, 'err', 7000); return; }
+    const text = plan.commands.join('\n');
+    const danger = items.filter(it => it.push.danger);
+    const save = h('input', { type: 'checkbox' });
+    const buttons = [
+      { label: 'Cancel' },
+      { label: 'Copy', onClick: async () => { try { await navigator.clipboard.writeText(text); toast('Copied', 'ok', 1200); } catch { toast('The browser did not allow the copy', 'warn'); } return true; } },
+      { label: 'Send to console', primary: !plan.canApply, onClick: () => this.sendToConsole(d, text) },
+    ];
+    if (plan.canApply) buttons.push({ label: 'Apply', primary: true, danger: danger.length > 0, onClick: () => { this.applyPlan(d, plan, save.checked); } });
+    modal(`Push to ${d.name}`, h('div', null,
+      h('p', { class: 'small' }, `Makes the device match the model for ${items.length} item(s):`),
+      h('ul', { class: 'small push-items' }, items.map(it => h('li', { class: it.push.danger ? 'warn' : '' }, it.push.label, h('span', { class: 'muted' }, ` (${it.text})`)))),
+      danger.length ? h('div', { class: 'warn small' }, '⚠ Some changes can cut the connection to the device (addresses, shutdown, trunks, default route). Make sure you can reach it another way (console cable, another address) before you apply them.') : null,
+      plan.notes.map(n => h('div', { class: 'muted small' }, n)),
+      h('h4', null, `Commands (${plan.driver})`),
+      h('pre', { class: 'mono-box tall' }, text || '(nothing to run)'),
+      plan.canApply ? h('label', { class: 'chk' }, save, 'Save to startup-config (write memory) after the commands') : null,
+      h('p', { class: 'muted small' }, plan.canApply
+        ? 'Apply runs exactly these commands over SSH, stops at the first one the device refuses, then reads the device again. Send to console pastes them into the SSH console for you to run.'
+        : 'This platform has no automatic apply. Send to console pastes the commands into the SSH console; check them and press Enter to run them.')),
+    buttons, { wide: true });
+  }
+
+  sendToConsole(d, text) {
+    const app = this.app;
+    app.inspector.conMode.set(d.id, 'ssh');
+    app.inspector.tab = 'console';
+    app.select({ type: 'device', id: d.id });
+    app.ssh.paste(d.id, text);
+  }
+
+  async applyPlan(d, plan, save) {
+    let password = null;
+    if (sshConf(d).auth === 'password') {
+      password = await askPassword(`${sshConf(d).user ? sshConf(d).user + '@' : ''}${sshHost(d)}`, 'The password goes to server.py to apply these changes. It is not saved.');
+      if (password === null) return;
+    }
+    toast(`Applying to ${d.name}…`, 'info', 2500);
+    let job;
+    try {
+      job = await postJson('/api/remediate/apply', { planId: plan.planId, save, password });
+      password = null;
+      job = await this.follow(job);
+    } catch (e) { toast('Apply: ' + e.message, 'err', 7000); return; }
+    const r = Object.values(job.devices)[0] || {};
+    await this.fetchFacts(this.labName, d.id);
+    this.changed();
+    const ok = r.state === 'done' && r.applied;
+    modal(ok ? `Applied to ${d.name}` : `Not fully applied to ${d.name}`, h('div', null,
+      ok ? h('p', { class: 'ok small' }, 'The device took every command. The drift report shows the device as read after the change.')
+        : h('div', { class: 'warn small' }, r.error || 'The apply did not finish.'),
+      r.transcript ? h('pre', { class: 'mono-box tall' }, r.transcript) : null), [{ label: 'Close' }], { wide: true });
   }
 
   changed() { this.app.onDriftChanged?.(); }

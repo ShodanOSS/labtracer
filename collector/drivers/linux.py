@@ -322,3 +322,39 @@ def _parse_pve(text, hostname):
         out.append({"name": g.get("name") or f"{g.get('type')}-{g.get('vmid')}", "vmid": g.get("vmid"),
                     "kind": "vm" if g.get("type") == "qemu" else "ct", "state": g.get("status", "")})
     return out
+
+
+# ---------------------------------------------------------------- remediation
+# No automatic apply on Linux: ip and hostnamectl change the running system only, and the
+# persistent config lives in different places (ifupdown, netplan, NetworkManager, Proxmox).
+# The commands are sent to the SSH console for the user to check and run.
+PERSIST_NOTE = ("These commands change the running system only. Also change the persistent config: "
+                "/etc/network/interfaces (Proxmox, Debian ifupdown), /etc/netplan/*.yaml, or NetworkManager (nmcli).")
+
+
+def render(ops):
+    import shlex
+    cmds, notes = [], [PERSIST_NOTE]
+    for o in ops:
+        op = o["op"]
+        dev = shlex.quote(o["port"]) if "port" in o else ""
+        if op == "hostname":
+            cmds.append(f"sudo hostnamectl set-hostname {shlex.quote(o['name'])}")
+        elif op == "iface-enable":
+            cmds.append(f"sudo ip link set dev {dev} {'up' if o['enabled'] else 'down'}")
+        elif op == "iface-desc":
+            cmds.append(f"sudo ip link set dev {dev} alias {shlex.quote(o['desc'])}" if o["desc"] else f"sudo ip link set dev {dev} alias ''")
+        elif op == "iface-ip":
+            for old in o["old"]:
+                cmds.append(f"sudo ip addr del {old} dev {dev}")
+            if o["ip"] == "dhcp":
+                notes.append(f"{o['port']}: start the DHCP client the system uses (for example: sudo dhclient {o['port']}, or networkctl).")
+            elif o["ip"]:
+                cmds.append(f"sudo ip addr add {o['ip']} dev {dev}")
+        elif op == "route-del":
+            cmds.append(f"sudo ip route del {o['dest']}" + (f" via {o['via']}" if o["via"] else f" dev {shlex.quote(o['dev'])}"))
+        elif op == "route-add":
+            cmds.append(f"sudo ip route add {o['dest']}" + (f" via {o['via']}" if o["via"] else f" dev {shlex.quote(o['dev'])}"))
+        else:
+            notes.append(f"{op} does not apply to a Linux host; skipped.")
+    return cmds, sorted(set(notes), key=notes.index)

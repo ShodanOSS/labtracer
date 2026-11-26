@@ -219,9 +219,48 @@ test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
     assert.ok(!(await page.$eval('#inspector', e => /Gi0\/3 is in VLAN 30/.test(e.textContent))), 'the item is gone');
     await page.click('#status-left'); await ctrl('z'); await sleep(150);
     assert.equal(await vlan(), 1, 'undo');
+    // push: server.py renders the commands from operations; the user reviews them
+    await page.evaluate(() => { const a = window.labtracer, d = a.lab.devices.find(x => x.name === 'rack-switch'); d.collect = { enabled: true, driver: 'ios', ignore: [] }; a.inspector.render(); });
+    const push = await page.evaluateHandle(() => [...document.querySelectorAll('#inspector .drow')].find(r => /Gi0\/3 is in VLAN 30/.test(r.textContent)).querySelector('.push'));
+    await push.evaluate(b => b.click()); await sleep(600);
+    const review = await page.$eval('.modal', e => e.textContent);
+    assert.match(review, /Push to rack-switch/);
+    assert.match(review, /interface GigabitEthernet0\/3\s+switchport mode access\s+switchport access vlan 1/, 'the rendered IOS commands');
+    assert.ok(await page.$$eval('.modal .btn', b => b.some(x => x.textContent === 'Send to console')));
+    await page.keyboard.press('Escape'); await sleep(100);
+    assert.equal(await vlan(), 1, 'reviewing changes nothing');
+    assert.ok(await page.evaluate(() => window.labtracer.events.connected), 'the live events WebSocket is open');
     await page.evaluate(() => { const a = window.labtracer; a.select(null); });
     assert.match(await page.$eval('#inspector', e => e.textContent), /Drift: model vs devices/);
     await page.evaluate(() => { const a = window.labtracer; a.collect.facts.clear(); a.onDriftChanged(); });
+  });
+
+  await t.test('Nagios: export the config, show Nagios results', async () => {
+    await page.evaluate(() => { const a = window.labtracer; a.select(null); });
+    await page.evaluate(() => { const s = document.querySelector('#inspector [data-k="nag-host"]'); s.value = window.labtracer.lab.devices.find(d => d.name === 'dc-01').id; s.dispatchEvent(new Event('change')); });
+    await sleep(100);
+    assert.match(await page.$eval('#inspector', e => e.textContent), /\d+ hosts, \d+ services/);
+    const lab = await page.evaluate(() => window.labtracer.labName);
+    await page.evaluate(() => [...document.querySelectorAll('#inspector .btn')].find(b => b.textContent === 'Export').click()); await sleep(600);
+    const cfg = readFileSync(join(tmp, 'data', 'export', lab, 'nagios', `labtracer-${lab}.cfg`), 'utf8');
+    assert.match(cfg, /host_name\s+srv-01[\s\S]*?parents\s+edge-router/, 'parents from the cabling');
+    // the agent with source "nagios": an unreachable host is grey, not red
+    const shown = await page.evaluate(() => {
+      const a = window.labtracer, m = a.monitor, d = a.lab.devices.find(x => x.name === 'plug-01'), now = Math.floor(Date.now() / 1000);
+      m.live = true; m.receivedAt = Date.now();
+      m.status = { source: 'nagios', nagiosHosts: ['plug-01', 'old-printer'], error: '', interval: 30, generated: now, now, targets: 1,
+        devices: { [d.id]: { name: d.name, state: 'unknown', nagiosState: 'UNREACHABLE', since: now, history: [],
+          checks: [{ type: 'nagios', host: 'plug-01', label: 'host', state: 'UNREACHABLE', ok: false, ms: null, err: 'CRITICAL - Host Unreachable' }] } } };
+      a.inspector.tab = 'monitor'; a.select({ type: 'device', id: d.id });
+      const tab = document.querySelector('#inspector').textContent;
+      a.select(null);
+      const panel = document.querySelector('#inspector').textContent;
+      m.stop();
+      return { tab, panel };
+    });
+    assert.match(shown.tab, /Nagios: UNREACHABLE/);
+    assert.match(shown.tab, /a parent of this host is down/);
+    assert.match(shown.panel, /In Nagios but not in the lab: old-printer/);
   });
 
   await t.test('undo and redo a move', async () => {

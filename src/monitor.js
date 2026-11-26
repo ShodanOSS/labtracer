@@ -1,6 +1,7 @@
 // Live status from the LabTracer check agent (agent/labtracer_agent.py).
-// LabTracer sends the agent a target list built from the lab, then polls
-// its results through server.py (the page itself never talks to the agent).
+// LabTracer sends the agent a target list built from the lab. server.py polls the agent
+// and pushes the results over /api/events (src/events.js); while that WebSocket is down,
+// this page polls through server.py. The page itself never talks to the agent.
 import { parseCIDR } from './util.js';
 import { isDeployed } from './model.js';
 import { toast } from './dialogs.js';
@@ -47,8 +48,29 @@ export class Monitor {
     this.live = false;
     this.timer = null;
     this.pushTimer = null;
+    const ev = app.events;
+    if (ev) {
+      ev.on('monitor', m => this.onPush(m));
+      ev.on('open', () => { if (this.live) this.pollEvery(false); });  // pushes replace polling
+      ev.on('close', () => { if (this.live) this.pollEvery(true); });
+    }
   }
   get available() { return this.app.store.mode === 'server'; }
+  get pushed() { return !!this.app.events?.connected; }
+
+  /** A status (or error) pushed by server.py. */
+  onPush(m) {
+    if (!this.live) return;
+    if (m.error) this.error = m.error;
+    else { this.status = m.status; this.error = ''; this.receivedAt = Date.now(); }
+    this.app.onMonitorStatus();
+  }
+  pollEvery(on) {
+    clearInterval(this.timer); this.timer = null;
+    if (!on) return;
+    const every = Math.max(5, Math.min(120, this.status?.interval || 30)) * 1000;
+    this.timer = setInterval(() => this.poll(), every);
+  }
 
   async loadConfig() {
     if (!this.available) return;
@@ -73,7 +95,7 @@ export class Monitor {
     this.pushTimer = setTimeout(() => {
       this.pushTimer = null;
       if (!this.live) return;
-      this.push(true).then(() => setTimeout(() => { if (this.live) this.poll(); }, 1500)).catch(e => this.fail(e));
+      this.push(true).then(() => setTimeout(() => { if (this.live && !this.app.events?.send({ type: 'poll' })) this.poll(); }, 1500)).catch(e => this.fail(e));
     }, 2500);
   }
   async poll() {
@@ -94,13 +116,13 @@ export class Monitor {
     this.live = true;
     await this.poll();
     setTimeout(() => { if (this.live) this.poll(); }, 3000); // first run after new targets takes a moment
-    const every = Math.max(5, Math.min(120, this.status?.interval || 30)) * 1000;
-    clearInterval(this.timer);
-    this.timer = setInterval(() => this.poll(), every);
+    this.app.events?.monitor(true);
+    this.pollEvery(!this.pushed);
     return true;
   }
   stop() {
     this.live = false;
+    this.app.events?.monitor(false);
     clearInterval(this.timer); this.timer = null;
     clearTimeout(this.pushTimer); this.pushTimer = null; // no target push after stop
     this.status = null; this.app.onMonitorStatus();

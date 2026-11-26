@@ -5,7 +5,7 @@ import { devById } from '../model.js';
 import { confirmBox, toast } from '../dialogs.js';
 import { runningConfig } from '../cli.js';
 import { sshConf, sshHost } from '../sshterm.js';
-import { AREAS, DRIVERS, collectConf, labCollectConf, driftCounts } from '../drift.js';
+import { AREAS, DRIVERS, collectConf, labCollectConf, driftCounts, safePushes } from '../drift.js';
 
 const SHOW = 8; // items per area before "show more"
 const COLLECTED_FILE = 'running-config (device)';
@@ -44,12 +44,14 @@ export class DriftTab {
     const shown = items.filter(it => !it.ignored), ignored = items.filter(it => it.ignored);
     const n = driftCounts(items);
     const acceptable = shown.filter(it => it.accept);
+    const pushable = safePushes(items);
     ap(el, h('div', { class: 'stline' },
       shown.length ? [n.error ? h('span', { class: 'stbadge sev-error' }, `${n.error} error`) : null, n.warn ? h('span', { class: 'stbadge sev-warn' }, `${n.warn} warning`) : null, n.info ? h('span', { class: 'stbadge sev-info' }, `${n.info} info`) : null]
         : h('span', { class: 'stbadge st-up' }, 'matches the model'),
       acceptable.length > 1 ? h('button', { class: 'mini txt', title: 'Change the model to match the device for every item below', onclick: async () => {
         if (await confirmBox('Accept all', `Change the model to match the device for ${acceptable.length} item(s)? You can undo this (Ctrl+Z).`, 'Accept all')) col.accept(d, acceptable);
-      } }, `accept all (${acceptable.length})`) : null));
+      } }, `accept all (${acceptable.length})`) : null,
+      pushable.length > 1 ? h('button', { class: 'mini txt', title: 'Make the device match the model for every item below that can not cut the connection. You review the commands first.', onclick: () => col.reviewPush(d, pushable) }, `push all (${pushable.length})`) : null));
 
     for (const [area, label] of AREAS) {
       const list = shown.filter(it => it.area === area);
@@ -64,7 +66,7 @@ export class DriftTab {
     const shownFacts = { ...f }; delete shownFacts.rawConfig;
     ap(el, h('details', { class: 'drift-raw' }, h('summary', { class: 'muted small' }, 'What the device reported'),
       h('pre', { class: 'mono-box tall' }, JSON.stringify(shownFacts, null, 1))),
-    h('p', { class: 'muted small' }, 'Accept changes the model to match the device (Ctrl+Z undoes it). Ignore hides a difference you expect. To change the device instead, use the SSH console.'));
+    h('p', { class: 'muted small' }, 'Accept changes the model to match the device (Ctrl+Z undoes it). Push changes the device to match the model: you see the commands first, then apply them (Cisco IOS) or send them to the SSH console. ⚠ marks a push that can cut the connection. Ignore (×) hides a difference you expect.'));
   }
 
   driftRow(d, it) {
@@ -74,6 +76,7 @@ export class DriftTab {
       h('span', { class: 'dtext' }, it.text),
       h('span', { class: 'btnrow tight' },
         it.accept && !it.ignored ? h('button', { class: 'mini txt', title: 'Change the model to match the device', onclick: () => col.accept(d, [it]) }, it.accept.label) : null,
+        it.push && !it.ignored ? h('button', { class: 'mini txt push' + (it.push.danger ? ' danger' : ''), title: `Change the device to match the model: ${it.push.label}${it.push.danger ? '. This can cut the connection to the device.' : ''}`, onclick: () => col.reviewPush(d, [it]) }, (it.push.danger ? '⚠ ' : '') + 'push') : null,
         h('button', { class: 'mini', title: it.ignored ? 'Show this difference again' : 'Ignore: an expected difference', onclick: () => col.setIgnored(d, it.key, !it.ignored) }, it.ignored ? '↺' : '×')));
   }
 
@@ -102,6 +105,11 @@ export class DriftTab {
     return h('div', null,
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: lc.autoAcceptInventory, 'data-k': 'col-auto', onchange: e => { lab.collect = { ...labCollectConf(lab), autoAcceptInventory: e.target.checked }; this.commit('Collect settings', 'none'); } }),
         'Fill in inventory facts automatically (serial, model, vendor, MAC, OS)'),
+      h('label', { class: 'fld' }, h('span', null, 'Collect again every … minutes (0 = off)'),
+        h('input', { class: 'inp', type: 'number', min: 0, max: 1440, step: 5, value: lc.interval || 0, 'data-k': 'col-interval', onchange: e => {
+          lab.collect = { ...labCollectConf(lab), interval: Math.max(0, Math.min(1440, Math.round(+e.target.value || 0))) }; this.commit('Collect settings', 'none');
+        } }),
+        h('small', null, 'Devices with key login only, while LabTracer is open. Unknown host keys wait for a manual Collect.')),
       h('div', { class: 'btnrow' },
         h('button', { class: 'btn small primary', disabled: col.running || !cands.length ? true : null, title: cands.map(d => d.name).join(', '), onclick: () => col.run(cands) },
           col.running ? `Collecting… (${running} left)` : `Collect all (${cands.length})`)),

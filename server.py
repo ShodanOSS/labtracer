@@ -13,8 +13,11 @@ Security posture:
   * All names are sanitised; paths can not leave ./data.
   * SSH console (ssh_bridge.py): off on a non-loopback bind; a WebSocket
     needs a one-time id from a header-guarded POST and a same-origin Origin.
-  * Collector (collector/): reads devices over SSH for the drift report.
-    Read-only on devices, off on a non-loopback bind, never stores passwords.
+  * Collector (collector/): reads devices over SSH for the drift report, and
+    applies reviewed changes. Off on a non-loopback bind, never stores passwords.
+    The browser sends operations, never command text (collector/ops.py).
+  * Events (/api/events): one WebSocket per window for live updates; same
+    Origin check as the SSH console. It carries no secrets.
 """
 
 import argparse
@@ -181,6 +184,79 @@ def agent_call(method, path, body=None, timeout=6):
         return json.loads(r.read().decode("utf-8"))
 
 
+# ---------------------------------------------------------------- live events
+class EventHub:
+    """Pushes live updates to every open LabTracer window over /api/events:
+    monitor status (one agent poll for all windows), collect and apply jobs, new facts.
+    Browser -> server messages: {"type": "subscribe", "monitor": bool}, {"type": "poll"}."""
+    MAX_CLIENTS = 16
+
+    def __init__(self):
+        self.clients = {}  # WebSocket -> {"monitor": bool}
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.thread = None
+
+    def add(self, ws):
+        with self.lock:
+            if len(self.clients) >= self.MAX_CLIENTS:
+                return False
+            self.clients[ws] = {"monitor": False}
+            if self.thread is None:
+                self.thread = threading.Thread(target=self._poller, name="agent-poller", daemon=True)
+                self.thread.start()
+        return True
+
+    def remove(self, ws):
+        with self.lock:
+            self.clients.pop(ws, None)
+
+    def broadcast(self, event, only=None):
+        with self.lock:
+            targets = [ws for ws, c in self.clients.items() if not only or c.get(only)]
+        for ws in targets:
+            if ws.closed:
+                self.remove(ws)
+            else:
+                ws.send_json(event)
+
+    def message(self, ws, m):
+        t = m.get("type") if isinstance(m, dict) else None
+        if t == "subscribe":
+            with self.lock:
+                if ws in self.clients:
+                    self.clients[ws]["monitor"] = bool(m.get("monitor"))
+            if m.get("monitor"):
+                self.wake.set()
+        elif t == "poll":
+            self.wake.set()
+
+    def _poller(self):
+        interval = 30
+        while True:
+            self.wake.wait(timeout=interval)
+            self.wake.clear()
+            with self.lock:
+                wanted = any(c["monitor"] for c in self.clients.values())
+            if not wanted:
+                interval = 30
+                continue
+            try:
+                st = agent_call("GET", "/status")
+                interval = max(5, min(120, int(st.get("interval") or 30)))
+                self.broadcast({"type": "monitor", "status": st}, only="monitor")
+            except urllib.error.HTTPError as exc:
+                self.broadcast({"type": "monitor", "error": f"agent said {exc.code} {exc.reason}"}, only="monitor")
+                interval = 30
+            except Exception as exc:  # noqa: BLE001
+                self.broadcast({"type": "monitor", "error": str(getattr(exc, "reason", exc))}, only="monitor")
+                interval = 30
+
+
+hub = EventHub()
+collector.listeners.append(hub.broadcast)
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "LabTracer/1.0"
 
@@ -279,6 +355,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(ssh_bridge.caps())
         if path == "/api/ssh/ws":
             return self._ssh_ws()
+        if path == "/api/events":
+            return self._events_ws()
         if path == "/api/collect/caps":
             return self._json(collector.caps())
         if path.startswith("/api/collect/jobs/"):
@@ -295,6 +373,51 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/"):
             return self._error(HTTPStatus.NOT_FOUND, "unknown endpoint")
         return super().do_GET()
+
+    def _upgrade(self):
+        """Answer a same-origin WebSocket upgrade. Returns the WebSocket, or None after an error reply."""
+        host = self.headers.get("Host") or ""
+        if self.headers.get("Origin") != f"http://{host}":
+            self._error(HTTPStatus.FORBIDDEN, "bad origin")
+            return None
+        if (self.headers.get("Upgrade") or "").lower() != "websocket" or not self.headers.get("Sec-WebSocket-Key"):
+            self._error(HTTPStatus.BAD_REQUEST, "WebSocket upgrade expected")
+            return None
+        self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", ssh_bridge.ws_accept(self.headers["Sec-WebSocket-Key"].strip()))
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        self.connection.settimeout(None)
+        return ssh_bridge.WebSocket(self.rfile, self.wfile, self.connection)
+
+    def _events_ws(self):
+        """Live updates for one window (see EventHub)."""
+        ws = self._upgrade()
+        if ws is None:
+            return None
+        if not hub.add(ws):
+            ws.close(1013)
+            return None
+        try:
+            ws.send_json({"type": "hello"})
+            while True:
+                op, msg = ws.recv()
+                if op is None:
+                    break
+                if op == 0x1:
+                    try:
+                        hub.message(ws, json.loads(msg.decode("utf-8")))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        finally:
+            hub.remove(ws)
+            ws.close()
+        return None
 
     def _ssh_ws(self):
         """WebSocket for one SSH session. Needs a one-time id from POST /api/ssh/session
@@ -420,6 +543,15 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/ssh/session":
             try:
                 return self._json(ssh_bridge.new_session(data))
+            except PermissionError as exc:
+                return self._error(HTTPStatus.FORBIDDEN, str(exc))
+            except ValueError as exc:
+                return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        if path == "/api/remediate/apply" or (path.startswith("/api/remediate/") and path.endswith("/plan")):
+            try:
+                if path == "/api/remediate/apply":
+                    return self._json(collector.apply(data))
+                return self._json(collector.plan(safe_name(unquote(path[len("/api/remediate/"):-len("/plan")])), data))
             except PermissionError as exc:
                 return self._error(HTTPStatus.FORBIDDEN, str(exc))
             except ValueError as exc:

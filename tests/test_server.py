@@ -15,6 +15,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -215,12 +216,201 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(body["devices"]["dev_1"]["state"], "error")
 
 
+    def ws_open(self, origin=None):
+        """Raw WebSocket handshake on /api/events. Returns (status line, socket)."""
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        host = f"127.0.0.1:{self.port}"
+        s.sendall((f"GET /api/events HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+                   f"Origin: {origin or 'http://' + host}\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = s.recv(1)
+            if not chunk:
+                break
+            head += chunk
+        return head.split(b"\r\n")[0].decode(), s
+
+    def test_events_websocket(self):
+        status, s = self.ws_open()
+        try:
+            self.assertIn("101", status)
+            b0, n = s.recv(2)
+            self.assertEqual(b0, 0x81, "a text frame")
+            self.assertEqual(json.loads(s.recv(n)), {"type": "hello"})
+            payload = json.dumps({"type": "subscribe", "monitor": True}).encode()
+            mask = b"\x01\x02\x03\x04"
+            s.sendall(bytes([0x81, 0x80 | len(payload)]) + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(payload)))
+            b0, n = s.recv(2)
+            ev = json.loads(s.recv(n))
+            self.assertEqual(ev["type"], "monitor", "server.py polls the agent for subscribers and pushes the result")
+            self.assertIn("no agent configured", ev["error"])
+        finally:
+            s.close()
+        status, s = self.ws_open(origin="http://evil.example")
+        s.close()
+        self.assertIn("403", status, "another origin can not listen")
+
+    def test_remediate_endpoints(self):
+        h = {"X-LabTracer": "1"}
+        st, _, body = self.req("POST", "/api/remediate/lab1/plan", {"device": {"id": "dev_1", "driver": "ios", "host": "192.0.2.1"},
+                                                                    "ops": [{"op": "exec", "cmd": "reload"}]}, h)
+        self.assertEqual(st, 400)
+        self.assertIn("unknown operation", body["error"])
+        st, _, body = self.req("POST", "/api/remediate/lab1/plan", {"device": {"id": "dev_1", "driver": "ios", "host": "192.0.2.1"},
+                                                                    "ops": [{"op": "sw-access", "port": "Gi0/3", "vlan": 20}]}, h)
+        self.assertEqual(st, 200)
+        self.assertIn(" switchport access vlan 20", body["commands"])
+        st, _, body = self.req("POST", "/api/remediate/apply", {"planId": "made-up"}, h)
+        self.assertEqual(st, 400)
+        st, _, _ = self.req("POST", "/api/remediate/apply", {"planId": "made-up"})
+        self.assertEqual(st, 403, "apply needs the X-LabTracer header")
+
+
 class SshBridgeTest(unittest.TestCase):
     def test_paramiko_not_loaded_at_import(self):
         code = ("import sys; sys.path.insert(0, sys.argv[1]); import ssh_bridge; "
                 "print('paramiko' in sys.modules)")
         out = subprocess.run([sys.executable, "-c", code, str(ROOT)], capture_output=True, text=True, check=True)
         self.assertEqual(out.stdout.strip(), "False", "server.py should start without loading paramiko")
+
+
+STATUS_DAT = """# NAGIOS STATE RETENTION FILE
+info {
+	created=%(created)d
+	version=4.5.1
+	}
+
+hoststatus {
+	host_name=srv-01
+	has_been_checked=1
+	current_state=0
+	plugin_output=PING OK - Packet loss = 0%%, RTA = 0.42 ms
+	last_state_change=1700000000
+	_LABTRACER_ID=0;dev_srv
+	}
+
+hoststatus {
+	host_name=nas-01
+	has_been_checked=1
+	current_state=0
+	plugin_output=PING OK
+	last_state_change=1700000100
+	}
+
+hoststatus {
+	host_name=plug-01
+	has_been_checked=1
+	current_state=2
+	plugin_output=CRITICAL - Host Unreachable (192.168.50.20)
+	last_state_change=1700000200
+	}
+
+servicestatus {
+	host_name=srv-01
+	service_description=ssh-22
+	has_been_checked=1
+	current_state=0
+	plugin_output=SSH OK - OpenSSH_9.2
+	last_state_change=1700000000
+	}
+
+servicestatus {
+	host_name=nas-01
+	service_description=smb-445
+	has_been_checked=1
+	current_state=2
+	plugin_output=connect to address 192.168.30.10 and port 445: Connection refused
+	last_state_change=1700000300
+	}
+"""
+
+
+class AgentNagiosTest(unittest.TestCase):
+    TARGETS = [{"id": "dev_srv", "name": "renamed in LabTracer", "checks": []},  # found by _LABTRACER_ID
+               {"id": "dev_nas", "name": "nas 01", "checks": []},                # found by name (nas-01)
+               {"id": "dev_plug", "name": "plug-01", "checks": []},
+               {"id": "dev_new", "name": "new-box", "checks": []}]
+
+    def make(self, created=None):
+        tmp = Path(tempfile.mkdtemp(prefix="labtracer-nagios-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "status.dat").write_text(STATUS_DAT % {"created": created or int(time.time())}, "utf-8")
+        cfg = dict(agent.DEFAULTS, source="nagios", nagios_status=str(tmp / "status.dat"))
+        a = agent.Agent(cfg, tmp)
+        a.set_targets(self.TARGETS)
+        a.run_once()
+        return a.snapshot()
+
+    def test_names_match_the_labtracer_export(self):
+        # the same table as NAMES in tests/nagios.test.mjs
+        for a, b in [("srv-01", "srv-01"), ("nas 01", "nas-01"), ("a;b(c)", "a-b-c"), ("  x  ", "x"), ("!!!", "unnamed"),
+                     ("o'neil\"s pc", "o-neil-s-pc")]:
+            self.assertEqual(agent.nag_name(a), b)
+
+    def test_parse(self):
+        created, hosts, services = agent.parse_status_dat(STATUS_DAT % {"created": 5})
+        self.assertEqual(created, 5)
+        self.assertEqual(hosts["srv-01"]["vars"], {"LABTRACER_ID": "dev_srv"})
+        self.assertEqual(services["nas-01"][0]["desc"], "smb-445")
+
+    def test_states(self):
+        snap = self.make()
+        dev = snap["devices"]
+        self.assertEqual(snap["source"], "nagios")
+        self.assertEqual(snap["nagiosHosts"], ["nas-01", "plug-01", "srv-01"])
+        self.assertEqual(snap["error"], "")
+        self.assertEqual((dev["dev_srv"]["state"], dev["dev_srv"]["nagiosHost"]), ("up", "srv-01"), "found by _LABTRACER_ID")
+        self.assertEqual([c["label"] for c in dev["dev_srv"]["checks"]], ["host", "ssh-22"])
+        self.assertEqual(dev["dev_nas"]["state"], "degraded", "host up, a service critical")
+        self.assertIn("Connection refused", dev["dev_nas"]["checks"][1]["err"])
+        self.assertEqual((dev["dev_plug"]["state"], dev["dev_plug"]["nagiosState"]), ("unknown", "UNREACHABLE"),
+                         "unreachable is not shown as down")
+        self.assertEqual((dev["dev_new"]["state"], dev["dev_new"]["nagiosState"]), ("unknown", "not in Nagios"))
+
+    def test_old_status_is_reported(self):
+        snap = self.make(created=int(time.time()) - 3600)
+        self.assertIn("is Nagios running", snap["error"])
+
+    def test_livestatus_rows(self):
+        def fake(path, query, timeout=5.0):
+            self.assertTrue(query.startswith("GET "), "read-only queries")
+            if query.startswith("GET hosts"):
+                return [["srv-01", 0, 1, "PING OK", 1700000000, ["LABTRACER_ID"], ["dev_srv"]]]
+            return [["srv-01", "ssh-22", 1, 1, "SSH WARNING", 1700000000]]
+        with mock.patch.object(agent, "_livestatus", side_effect=fake):
+            _, hosts, services = agent.query_livestatus("/run/naemon/live")
+        state, nstate, checks = agent.nagios_device(hosts["srv-01"], services["srv-01"], "srv-01")
+        self.assertEqual(hosts["srv-01"]["vars"], {"LABTRACER_ID": "dev_srv"})
+        self.assertEqual((state, nstate, checks[1]["state"]), ("degraded", "UP", "WARNING"))
+
+    def test_status_over_http(self):
+        from http.server import ThreadingHTTPServer
+        tmp = Path(tempfile.mkdtemp(prefix="labtracer-nagios-http-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "status.dat").write_text(STATUS_DAT % {"created": int(time.time())}, "utf-8")
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), agent.Handler)
+        httpd.agent = agent.Agent(dict(agent.DEFAULTS, token="t" * 20, source="nagios", nagios_status=str(tmp / "status.dat")), tmp)
+        httpd.agent.set_targets(self.TARGETS)
+        httpd.agent.run_once()
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)  # cleanups run last-in first-out: shutdown, then close
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/status"
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(url, timeout=5)
+        self.assertEqual(cm.exception.code, 401, "Nagios results also need the token")
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": "Bearer " + "t" * 20}), timeout=5) as r:
+            snap = json.loads(r.read())
+        self.assertEqual((snap["source"], snap["version"]), ("nagios", agent.VERSION))
+        self.assertEqual(snap["devices"]["dev_srv"]["state"], "up")
+
+    def test_missing_status_file(self):
+        tmp = Path(tempfile.mkdtemp(prefix="labtracer-nagios-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        a = agent.Agent(dict(agent.DEFAULTS, source="nagios", nagios_status=str(tmp / "nope.dat")), tmp)
+        a.run_once()
+        self.assertIn("can not read the Nagios status", a.snapshot()["error"])
 
 
 class AgentTest(unittest.TestCase):

@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { compareDevice, normPort, driftCounts, inventoryFacts, collectConf, cable } from '../src/drift.js';
+import { compareDevice, normPort, driftCounts, inventoryFacts, collectConf, cable, safePushes } from '../src/drift.js';
 import { buildSampleLab } from '../src/sample.js';
 import { normalizeLab, linksOfPort, portByName } from '../src/model.js';
 import { clone } from '../src/util.js';
@@ -163,4 +163,33 @@ test('BusyBox router: extra interfaces and routes', () => {
   assert.ok(find(items, /The device calls itself DD-WRT/));
   assert.ok(find(items, /Route 10\.8\.0\.0\/16 via 192\.168\.1\.2/));
   assert.ok(!find(items, /\blo\b.*not in the model/), 'loopback is never extra');
+});
+
+test('push: operations that make the device match the model', () => {
+  const lab = sample(), d = dev(lab, 'rack-switch');
+  const items = compareDevice(lab, d, facts('ios-switch'));
+  const vl = find(items, /Gi0\/3 is in VLAN 30/);
+  assert.deepEqual(vl.push.ops, [{ op: 'sw-access', port: 'GigabitEthernet0/3', vlan: 1 }], 'uses the device interface name and the planned VLAN');
+  assert.equal(vl.push.danger, false);
+  const tr = find(items, /Gi0\/48 carries VLANs/);
+  assert.equal(tr.push.danger, true, 'trunk changes can cut the uplink');
+  assert.deepEqual(tr.push.ops[0], { op: 'sw-trunk', port: 'GigabitEthernet0/48', nativeVlan: 1, trunkVlans: '1,20,30,40,50' });
+  assert.deepEqual(find(items, /VLAN 50 \(iot\) is not on the device/).push.ops, [{ op: 'vlan-add', id: 50, name: 'iot' }]);
+  assert.equal(find(items, /VLAN 10 \(mgmt\) is on the device/).push.danger, true, 'deleting a VLAN is dangerous');
+  const def = find(items, /Route 0\.0\.0\.0\/0 via 192\.168\.10\.1 is on the device/);
+  assert.equal(def.push.danger, true, 'removing the default route is dangerous');
+  assert.ok(!find(items, /Model WS-C2960X/).push, 'inventory facts can not be pushed');
+  const safe = safePushes(items);
+  assert.ok(safe.length && safe.every(it => !it.push.danger));
+});
+
+test('push: changing the address LabTracer connects to is dangerous', () => {
+  const lab = sample(), d = dev(lab, 'srv-01');
+  const f = facts('linux-pve');
+  f.host = '10.99.0.2';
+  portByName(d, 'eno2').ip = '';
+  d.ports.push({ ...portByName(d, 'eno2'), id: 'pt_wg', name: 'wg0', kind: 'tunnel', ip: '10.99.0.9/24' });
+  const it = find(compareDevice(lab, d, f), /wg0 has 10\.99\.0\.2\/24 on the device/);
+  assert.deepEqual(it.push.ops, [{ op: 'iface-ip', port: 'wg0', ip: '10.99.0.9/24', old: ['10.99.0.2/24'] }]);
+  assert.equal(it.push.danger, true);
 });

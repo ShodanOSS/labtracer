@@ -7,5 +7,9 @@
   "workers": 16,
   "history": 120,
   "tls_cert": "",
-  "tls_key": ""
+  "tls_key": "",
+  "source": "checks",
+  "nagios_status": "/usr/local/nagios/var/status.dat",
+  "livestatus": "",
+  "nagios_max_age": 300
 }

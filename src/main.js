@@ -13,6 +13,7 @@ import { MEDIA } from './templates.js';
 import { Monitor } from './monitor.js';
 import { SshManager } from './sshterm.js';
 import { Collector } from './collect.js';
+import { Events } from './events.js';
 import { History } from './history.js';
 import { Panels } from './panels.js';
 import { migrateLab, migrateLibrary, LIBRARY_VERSION } from './migrations.js';
@@ -52,6 +53,7 @@ class App {
     this.palette = new Palette(document.getElementById('palette'), this);
     this.inspector = new Inspector(document.getElementById('inspector'), this);
     this.cli = new Cli(this);
+    this.events = new Events();
     this.monitor = new Monitor(this);
     this.ssh = new SshManager(this);
     this.collect = new Collector(this);
@@ -59,6 +61,7 @@ class App {
     document.getElementById('viewport').appendChild(invEl);
     this.inventory = new InventoryView(invEl, this);
     await this.monitor.loadConfig();
+    this.events.start();
     this.bindToolbar();
     this.bindKeys();
     this.palette.render();
@@ -74,6 +77,7 @@ class App {
     else if (!opened) this.loadLab(newLab('new-lab'), await this.freeLabName('new-lab'));
 
     setInterval(() => { if (this.dirty && !this.conflict && !this.saveBlocked && this.settings.autosave && store.mode === 'server') this.save(true); }, 30000);
+    setInterval(() => this.collect.tick(), 60000); // scheduled collection (lab panel, Drift)
     window.addEventListener('beforeunload', e => { if (this.dirty) { e.preventDefault(); e.returnValue = ''; } });
     this.updateStatus();
     document.getElementById('mode-badge').textContent = store.mode === 'server' ? 'Saved to disk' : 'Browser storage';

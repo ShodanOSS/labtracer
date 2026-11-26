@@ -326,3 +326,7 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 .drift-raw pre { max-height: 300px; overflow: auto; }
 .lbl[data-drift]::after { content: attr(data-drift); position: absolute; top: -8px; right: -10px; font: 600 9.5px var(--mono); padding: 0 4px; border-radius: 7px; background: #3a2e12; color: var(--warn); border: 1px solid #6e5520; }
 .lbl.drift-err[data-drift]::after { background: #3c1412; color: var(--err); border-color: #7a3030; }
+.drow .mini.txt.push { color: var(--accent); }
+.drow .mini.txt.push.danger { color: var(--warn); }
+.push-items { margin: 4px 0 8px; padding-left: 18px; }
+.push-items li { margin: 2px 0; }
