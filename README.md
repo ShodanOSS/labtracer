@@ -13,14 +13,25 @@ It has:
 - Config files for each device, with dated snapshots, diff and restore.
 - Custom objects. You can make a new device type and import a `.glb` 3D model for it.
 - An inventory table with status, asset tag, purchase date, supplier, cost and warranty, and CSV import and export.
+- Live status from a small check agent, or from Nagios. LabTracer can also export a Nagios config from the lab.
+- Drift: LabTracer reads the real devices over SSH and shows how they differ from the model. You can accept a difference into the model, or push the model to the device.
 
-All data stays on your computer. The app does not connect to the internet. The SSH console connects only to the devices that you select.
+All data stays on your computer. The app does not connect to the internet. The SSH console, Collect and Push connect only to the devices that you select.
+
+## Contents
+
+- [Requirements](#requirements) · [Start the app](#start-the-app) · [Where the data is](#where-the-data-is) · [First start](#first-start)
+- Model the lab: [Views](#views) · [Add devices](#add-devices) · [Connect devices](#connect-devices) · [Wall ports](#wall-ports) · [Cable routes](#cable-routes) · [Move a cable](#move-a-cable) · [Wireless](#wireless-ssids-and-iot-devices) · [Inventory](#inventory) · [Device properties](#device-properties)
+- Configs and consoles: [Config files](#config-files-and-snapshots) · [Console commands](#console-commands) · [SSH console](#ssh-console) · [Network simulator](#network-simulator)
+- Real devices: [Live status](#live-status) · [Nagios](#nagios) · [Drift](#drift-model-vs-device)
+- Other: [Custom objects](#custom-objects) · [Keyboard](#keyboard) · [Colours](#colours) · [Performance](#performance-on-older-pcs) · [Security](#security) · [Git](#git)
+- Development: [Rebuild from source](#rebuild-from-source) · [Change the lab format](#change-the-lab-format) · [Tests](#tests) · [Files](#files)
 
 ## Requirements
 
 - Python 3.8 or later. The server uses only the standard library.
 - A current browser: Chrome, Edge or Firefox. WebGL must be on.
-- Optional, for the SSH console: `pip install paramiko`. For the System ssh engine on Windows: `pip install pywinpty`.
+- Optional, for the SSH console and for Collect and Push (drift): `pip install paramiko`. For the System ssh engine of the SSH console on Windows: `pip install pywinpty`.
 - Node.js is NOT necessary to run the app. It is necessary only to rebuild `app/app.js` from `src/`.
 
 Target hardware: an 8th generation Intel Core i5 with 8 GB RAM and integrated graphics. The server uses approximately 35 MB of RAM, and approximately 50 MB after you first open an SSH console (paramiko loads then). The browser tab uses approximately 200 to 300 MB (measured: 280 MB with software rendering, 6 MB of it JavaScript heap). The app does not draw frames when idle.
@@ -63,7 +74,8 @@ You can open `app/index.html` directly in the browser. In this mode, the app kee
 | `data/.history/` | Copies of `library.json` from before a format upgrade. |
 | `data/export/<lab>/<device>/` | Config files from File > Export all configs. |
 | `data/monitor.json` | Agent address and token. Do not put this file in git. |
-| `data/ssh/known_hosts` | Host keys that you trusted in the SSH console (paramiko engine). |
+| `data/ssh/known_hosts` | Host keys that you trusted in the SSH console (paramiko engine) or in Collect. |
+| `data/observed/<lab>/` | What Collect read from each device (facts and config), for the drift report. |
 
 If the same lab is open in two browser windows or tabs, a window cannot silently overwrite the other window's saved changes. Autosave stops in the window with the older version, and Ctrl+S asks which version to keep. If you replace the other version, a copy of it goes into `data/labs/.history/`.
 
@@ -356,7 +368,7 @@ Old devices can use algorithms that are off by default: `ssh-rsa`, SHA-1 key exc
 1. Select "Allow legacy algorithms".
 2. Set the engine to "System ssh".
 
-paramiko 5 and later have no SHA-1 key exchange and no `ssh-rsa`. Thus, for legacy devices, use the System ssh engine.
+paramiko 5 and later have no SHA-1 key exchange and no `ssh-rsa`. Thus, for legacy devices, use the System ssh engine. Collect and Push use only paramiko, so with paramiko 5 or later they cannot connect to a device that needs SHA-1 key exchange.
 
 The SSH console is not available when you open `index.html` directly, or when server.py listens on a network address (`--host`).
 
@@ -412,7 +424,7 @@ Collect is read-only on the device. It runs `show` commands, `ip`, `ss`, `lldpct
 | Cisco IOS and IOS-XE | `ios` | `show running-config` needs privilege 15 (the prompt must end with `#`). |
 | MikroTik, Windows, OPNsense, UniFi | — | Planned. "Detect" names them and says they are not supported yet. |
 
-1. Set up SSH in the Console tab of the device (host, user, key). Collect uses the same settings and the same `data/ssh/known_hosts`.
+1. Set up SSH in the Console tab of the device (host, user, key). Collect uses the same settings and the same `data/ssh/known_hosts`. Collect and Push always use the paramiko engine, also when the console uses System ssh. They do not read `~/.ssh/config`, so set the host, user and key file in the Console tab.
 2. Open the Drift tab and click **Collect now**. To read every device with SSH settings, click **Collect all** in the lab panel (click an empty area of the 3D view).
 3. For each difference, choose:
    - **Accept**: change the model to match the device. Ctrl+Z undoes it.
@@ -523,7 +535,7 @@ The `.gitignore` ignores all files, then allows only the files of the app. This 
 
 These items are never committed:
 
-- The `data` folder: labs, lab history, custom objects, exported configs, agent address and token, SSH host keys.
+- The `data` folder: labs, lab history, custom objects, exported configs, agent address and token, SSH host keys, facts collected from devices.
 - `node_modules`.
 - `agent/agent.json` and `agent/targets.json`.
 - Certificates and keys (`*.pem`, `*.key`, `*.crt`, `*.p12`), `.env` files and files with `.local.` in the name.
@@ -587,7 +599,7 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 |---|---|
 | `server.py` | Local server and storage API. |
 | `ssh_bridge.py` | SSH console: WebSocket, paramiko and System ssh engines. |
-| `collector/` | Collect and push for the drift report: jobs and plans (`__init__.py`), SSH commands (`conn.py`), stored facts (`store.py`), push operations and their checks (`ops.py`), one driver per platform (`drivers/`: read, render commands, apply). |
+| `collector/` | Collect and push for the drift report: jobs and plans (`__init__.py`), SSH commands (`conn.py`), the facts format that every driver fills (`facts.py`), stored facts (`store.py`), push operations and their checks (`ops.py`), one driver per platform (`drivers/`: detect, read, render commands, apply). |
 | `app/` | The built web app (`index.html`, `style.css`, `app.js`). |
 | `build.mjs` | Build of `app/app.js` from `src/`, and the check that they match. |
 | `src/main.js` | App state, save, selection, views, keyboard. |
@@ -614,8 +626,11 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 | `src/collect.js` | Collect and push in the browser: starts runs, keeps the facts of the open lab, shows commands for review. |
 | `src/events.js` | Live events WebSocket from server.py (monitor status, jobs, new facts). |
 | `src/nagios.js` | Nagios config made from the lab (hosts, parents from the cables, services, hostgroups). |
+| `src/dialogs.js` | Dialogs, popups and toasts. |
+| `src/diff.js` | Line diff for config snapshots and Compare config. |
+| `src/util.js` | Shared helpers: DOM building, ids, IP math, `mixin()`. |
 | `agent/` | The check agent, its systemd unit and its instructions. |
-| `tests/` | Tests: `build.test.mjs`, `history.test.mjs`, `migrations.test.mjs`, `inventory.test.mjs`, `drift.test.mjs`, `nagios.test.mjs` (Node), `test_server.py`, `test_collector.py`, `test_remediate.py` (Python), `ui.test.mjs` (browser). |
+| `tests/` | Tests: `build.test.mjs`, `history.test.mjs`, `migrations.test.mjs`, `inventory.test.mjs`, `drift.test.mjs`, `nagios.test.mjs` (Node), `test_server.py`, `test_collector.py`, `test_remediate.py` (Python, started by `run-py.mjs`), `ui.test.mjs` (browser). |
 | `tests/collect-fixtures/` | Recorded device output and the facts the drivers must make from it (`python tests/test_collector.py --regen` updates the facts after a deliberate parser change). |
 | `tests/fixtures/` | One saved lab and library for each format version. Frozen: never edit them. |
 
