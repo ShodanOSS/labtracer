@@ -13,17 +13,21 @@ It has:
 - Config files for each device, with dated snapshots, diff and restore.
 - Custom objects. You can make a new device type and import a `.glb` 3D model for it.
 - An inventory table with status, asset tag, purchase date, supplier, cost and warranty, and CSV import and export.
-- Live status from a small check agent, or from Nagios. LabTracer can also export a Nagios config from the lab.
 - Drift: LabTracer reads the real devices over SSH and shows how they differ from the model. You can accept a difference into the model, or push the model to the device.
+- Discovery: LabTracer sweeps address ranges, reads the devices it can log in to, follows LLDP/CDP and ARP tables, and adds what it finds to the lab, with ports, addresses and cables.
+- Push to Cisco IOS, Linux (ifupdown, Proxmox, NetworkManager, netplan) and MikroTik RouterOS, with the change made persistent, a backup before each change, a rollback timer on the device, and restore.
+- Change sets: stage changes for many devices, review them together, apply them in order. Every change goes into an audit log that shows tampering.
+- Live status from a small check agent, from Nagios (through the agent), or from Prometheus, Zabbix, Icinga 2 or LibreNMS. LabTracer can also export a Nagios config from the lab.
+- Remote access: RDP, VNC, SSH and Telnet in a window of the app, over Apache Guacamole (guacd only, no Guacamole web app).
 
-All data stays on your computer. The app does not connect to the internet. The SSH console, Collect and Push connect only to the devices that you select.
+All data stays on your computer. The app does not connect to the internet. The SSH console, Collect, Push, Discovery and remote sessions connect only to the devices and address ranges that you select.
 
 ## Contents
 
 - [Requirements](#requirements) · [Start the app](#start-the-app) · [Where the data is](#where-the-data-is) · [First start](#first-start)
 - Model the lab: [Views](#views) · [Add devices](#add-devices) · [Connect devices](#connect-devices) · [Wall ports](#wall-ports) · [Cable routes](#cable-routes) · [Move a cable](#move-a-cable) · [Wireless](#wireless-ssids-and-iot-devices) · [Inventory](#inventory) · [Device properties](#device-properties)
 - Configs and consoles: [Config files](#config-files-and-snapshots) · [Console commands](#console-commands) · [SSH console](#ssh-console) · [Network simulator](#network-simulator)
-- Real devices: [Live status](#live-status) · [Nagios](#nagios) · [Drift](#drift-model-vs-device)
+- Real devices: [Live status](#live-status) · [Nagios](#nagios) · [Other monitoring systems](#other-monitoring-systems) · [Discover a network](#discover-a-network) · [Drift](#drift-model-vs-device) · [Push](#push-the-model-to-a-device) · [Change sets and audit log](#change-sets-and-audit-log) · [Backups and recovery](#backups-and-recovery) · [Remote access](#remote-access-guacamole)
 - Other: [Custom objects](#custom-objects) · [Keyboard](#keyboard) · [Colours](#colours) · [Performance](#performance-on-older-pcs) · [Security](#security) · [Git](#git)
 - Development: [Rebuild from source](#rebuild-from-source) · [Change the lab format](#change-the-lab-format) · [Tests](#tests) · [Files](#files)
 
@@ -31,7 +35,8 @@ All data stays on your computer. The app does not connect to the internet. The S
 
 - Python 3.8 or later. The server uses only the standard library.
 - A current browser: Chrome, Edge or Firefox. WebGL must be on.
-- Optional, for the SSH console and for Collect and Push (drift): `pip install paramiko`. For the System ssh engine of the SSH console on Windows: `pip install pywinpty`.
+- Optional, for the SSH console and for Collect, Push and Discovery: `pip install paramiko`. For the System ssh engine of the SSH console on Windows: `pip install pywinpty`.
+- Optional, for remote access (RDP, VNC): guacd, the Apache Guacamole server daemon. For example `docker run -d -p 127.0.0.1:4822:4822 guacamole/guacd`, or the `guacd` package of your Linux distribution.
 - Node.js is NOT necessary to run the app. It is necessary only to rebuild `app/app.js` from `src/`.
 
 Target hardware: an 8th generation Intel Core i5 with 8 GB RAM and integrated graphics. The server uses approximately 35 MB of RAM, and approximately 50 MB after you first open an SSH console (paramiko loads then). The browser tab uses approximately 200 to 300 MB (measured: 280 MB with software rendering, 6 MB of it JavaScript heap). The app does not draw frames when idle.
@@ -76,6 +81,11 @@ You can open `app/index.html` directly in the browser. In this mode, the app kee
 | `data/monitor.json` | Agent address and token. Do not put this file in git. |
 | `data/ssh/known_hosts` | Host keys that you trusted in the SSH console (paramiko engine) or in Collect. |
 | `data/observed/<lab>/` | What Collect read from each device (facts and config), for the drift report. |
+| `data/discovery/<lab>.json` | The last discovery result of the lab. |
+| `data/changes/<lab>/` | Change sets: staged, applied and discarded, with each device's result. |
+| `data/backups/<lab>/<device>/` | The config of a device from before each change LabTracer applied. |
+| `data/audit/<lab>.jsonl` | The audit log: every change, backup, rollback, restore, discovery and remote session. |
+| `data/remote.json` | The guacd address for remote access. |
 
 If the same lab is open in two browser windows or tabs, a window cannot silently overwrite the other window's saved changes. Autosave stops in the window with the older version, and Ctrl+S asks which version to keep. If you replace the other version, a copy of it goes into `data/labs/.history/`.
 
@@ -88,7 +98,7 @@ Each lab file and `library.json` has a format version (`"version"` in the file).
 
 Undo and redo history lives only in the browser tab. It is not saved, and it is gone when you reload the page or stop the server.
 
-The `.gitignore` keeps the `data` folder out of git. Your labs, custom objects, exported configs and the agent token stay on your computer.
+The `.gitignore` keeps the `data` folder out of git. Your labs, custom objects, exported configs, device backups, the audit log and all tokens stay on your computer.
 
 The lab files are JSON. You can keep them in git. Do not put secrets in the lab notes or config files.
 
@@ -207,7 +217,7 @@ Click "Inventory" in the toolbar, or push 3. The inventory shows all items of th
 
 Set the status in the Inventory section of the General tab.
 
-| Status | Drawn in the 3D views | Checked by the agent |
+| Status | Drawn in the 3D views | Checked for live status |
 |---|---|---|
 | In service | Yes | Yes |
 | Faulty / in repair | Yes | Yes |
@@ -256,9 +266,9 @@ File > Export inventory (.csv) exports all items, in the same format. "Export CS
 | Routing | Static routes, live routing table, ping test, VLAN database. |
 | Services | Services that run on the device. |
 | Configs | Generated running-config and your own config files. |
-| Console | IOS-style command line (Simulated), or a real SSH session to the device (SSH). |
-| Monitor | What the check agent tests on this device, and the live results. |
-| Drift | How the real device differs from the model (see [Drift](#drift-model-vs-device)). |
+| Console | IOS-style command line (Simulated), a real SSH session to the device (SSH), or a remote desktop or terminal over Guacamole (Remote). |
+| Monitor | What the check agent tests on this device, and the live results (from the agent, Nagios or a monitoring system). |
+| Drift | How the real device differs from the model (see [Drift](#drift-model-vs-device)): accept, push or stage each difference; **Backups** and **Audit** for this device. |
 
 ### Port kinds
 
@@ -390,7 +400,7 @@ The simulator does NOT check firewall rules, NAT, ARP, STP, DHCP, link speed or 
 
 ## Live status
 
-LabTracer can show live status from a small check agent. The agent pings each device and connects to its TCP service ports. Run the agent on a computer that is always on.
+LabTracer can show live status from a small check agent. The agent pings each device and connects to its TCP service ports. Run the agent on a computer that is always on. Instead of its own checks, the agent can pass on the results of [Nagios](#nagios). LabTracer can also read the results of [Prometheus, Zabbix, Icinga 2 or LibreNMS](#other-monitoring-systems) directly.
 
 Green is up. Orange is degraded. Red is down. Grey is unknown.
 
@@ -398,7 +408,7 @@ To install and connect the agent, read `agent/README.md`.
 
 Live status needs server.py. It is not available when you open `index.html` directly.
 
-server.py polls the agent once for all open LabTracer windows and pushes the results to them over a WebSocket (`/api/events`). If that connection drops, each window polls server.py until it is back.
+server.py polls the agent (or the monitoring system) once for all open LabTracer windows and pushes the results to them over a WebSocket (`/api/events`). If that connection drops, each window polls server.py until it is back.
 
 ### Nagios
 
@@ -411,37 +421,113 @@ LabTracer can make a Nagios config from the lab, and show the results of Nagios 
 
 To set up Nagios and the agent, read "Use Nagios" in `agent/README.md`.
 
+### Other monitoring systems
+
+LabTracer can also show the results of a monitoring system you already run. In the lab panel, under **Monitoring**, set **Status from**:
+
+| Status from | URL | Login | What LabTracer reads |
+|---|---|---|---|
+| LabTracer agent | `http://host:8766` | agent token | The agent's ping and TCP checks, or Nagios results (agent source "nagios"). |
+| Prometheus | `http://prometheus:9090` | none, a bearer token, or user and password | `up` and `probe_success` (blackbox exporter) per instance. |
+| Zabbix (5.4 or later) | `https://zabbix.example/zabbix` | API token | Host availability and open problems. |
+| Icinga 2 | `https://icinga:5665` | API user and password | Host and service states. |
+| LibreNMS | `http://librenms` | API token | Device status and open alerts. |
+
+Click **Test**, then **Start live**. LabTracer matches each monitored host to a lab device by the monitor address of the device (Monitor tab), then by name (without the domain). The lab panel shows how many hosts it matched. A device is up when all its checks are OK, degraded when some fail, and down when the host itself is down. LabTracer only reads: it never changes the monitoring system. For HTTPS with your own CA, set the CA file; "Skip TLS certificate check" is for tests only.
+
+server.py reads the monitoring system once for all open windows, like the agent. The token or password is kept in `data/monitor.json`.
+
+## Discover a network
+
+Discovery finds the devices of a network that the lab does not have yet, and adds them.
+
+1. Click an empty area of the 3D view. In the lab panel, under **Discover network**, click **Discover…**.
+2. Type the addresses to sweep: subnets, ranges and single addresses, separated by commas (`192.168.1.0/24, 10.0.0.1-50, 10.0.5.7`). At most 4096 addresses in one run.
+3. Optional: an SSH user and key (or password) to read the devices. Without them, LabTracer finds hosts and open ports only.
+4. Optional: **Crawl**. LabTracer then also sweeps the management addresses of LLDP/CDP neighbors and the addresses in the ARP tables of the devices it read (private addresses only), and, with the second box, their connected subnets (/22 or smaller).
+5. Click **Start**. The lab panel shows the progress. Then the results open.
+6. In the results, clear the hosts you do not want, check the names and types, and click **Add to the lab**.
+
+What discovery does:
+
+| Step | How |
+|---|---|
+| Find hosts | TCP connect to common ports (22, 80, 443, 445, 3389, 53, 23, 8006, 8291, 8080); a refused connection also counts. Then a ping, then this PC's ARP cache (finds hosts on the local subnet that block every port). No raw sockets, no root. |
+| Open ports | A longer port list on each host found (printers, cameras, NAS, MQTT, VNC and others). |
+| Names and MACs | Reverse DNS. MACs from this PC's ARP cache and from the ARP tables of the devices read. |
+| Read devices | Hosts with SSH open are read with the same drivers as Collect (Linux, Cisco IOS, RouterOS). |
+| Type | From what was read (switch, router, hypervisor, NAS, Raspberry Pi) or from the open ports (printer, camera, Windows PC, smart home hub). You can change it in the results. |
+
+What **Add to the lab** makes: a device for each host, placed in rows in the topology view (routers, switches, servers, others); ports, addresses, VLANs, static routes, services and Proxmox VMs from what was read; SSH settings, so Collect works at once; and cables:
+
+- from LLDP and CDP neighbors;
+- from switch MAC tables: an access port (not a trunk) without LLDP/CDP neighbor that learned the MAC of one known device is cabled to it. When it learned the MACs of several known devices, LabTracer adds an unmanaged switch between them (a note on the device says so).
+
+The facts of the devices read become their drift facts, so the Drift tab works at once. Hosts that are already in the lab (same address, MAC or name) are not added again. Ctrl+Z removes everything that **Add to the lab** added.
+
+New host keys: by default the results list them, with **Trust N host key(s)…** to compare the fingerprints and read those hosts again. **Trust the host key of devices seen for the first time** saves them without asking (each is logged).
+
+Discovery is read-only, like Collect. The last result is in `data/discovery/<lab>.json`.
+
 ## Drift: model vs device
 
 The lab is the plan. Collect reads the real device over SSH and lists each difference: addresses, interfaces, switchport modes and VLANs, static routes, cabling (LLDP or CDP neighbors), open TCP ports, Proxmox VMs and containers, and inventory facts (vendor, model, serial, MAC, OS).
 
-Collect is read-only on the device. It runs `show` commands, `ip`, `ss`, `lldpctl` and `pvesh`. Only **Push** changes a device, and only after you review the commands.
+Collect is read-only on the device. It runs `show` commands, `ip`, `ss`, `lldpctl`, `pvesh` and RouterOS `print` and `export`. Only **Push** changes a device, and only after you review the commands.
 
-| Platform | Driver | Notes |
-|---|---|---|
-| Linux, Proxmox VE, Raspberry Pi | `linux` | For neighbors, install `lldpd`. Proxmox guests and the serial number need root. |
-| DD-WRT and other BusyBox systems | `linux` | Reads `ifconfig`, `route -n` and `nvram`. |
-| Cisco IOS and IOS-XE | `ios` | `show running-config` needs privilege 15 (the prompt must end with `#`). |
-| MikroTik, Windows, OPNsense, UniFi | — | Planned. "Detect" names them and says they are not supported yet. |
+| Platform | Driver | Collect | Push |
+|---|---|---|---|
+| Linux, Proxmox VE, Raspberry Pi | `linux` | For neighbors, install `lldpd`. Proxmox guests and the serial number need root. | Apply, persistent (see below). Needs root or `sudo` without a password. |
+| DD-WRT and other BusyBox systems | `linux` | Reads `ifconfig`, `route -n` and `nvram`. | Send to console. |
+| Cisco IOS and IOS-XE | `ios` | `show running-config` needs privilege 15 (the prompt must end with `#`). | Apply; `write memory` after the confirmation. |
+| MikroTik RouterOS 6 and 7 | `routeros` | Exec commands (`print terse`, `export terse`). | Apply (addresses, routes, interfaces, names). Switch ports and VLANs: console. |
+| Windows, OPNsense, UniFi | — | Planned. "Detect" names them and says they are not supported yet. | — |
 
 1. Set up SSH in the Console tab of the device (host, user, key). Collect uses the same settings and the same `data/ssh/known_hosts`. Collect and Push always use the paramiko engine, also when the console uses System ssh. They do not read `~/.ssh/config`, so set the host, user and key file in the Console tab.
 2. Open the Drift tab and click **Collect now**. To read every device with SSH settings, click **Collect all** in the lab panel (click an empty area of the 3D view).
 3. For each difference, choose:
    - **Accept**: change the model to match the device. Ctrl+Z undoes it.
    - **Push**: change the device to match the model (see below).
+   - **Stage**: add the push to a change set, to apply it later with changes on other devices (see [Change sets](#change-sets-and-audit-log)).
    - **Ignore** (×): hide a difference you expect.
 
 ### Push the model to a device
 
-**Push** on an item (or **push all**) shows the commands that make the device match the model. Nothing runs until you choose:
+**Push** on an item (or **push all**) shows the commands that make the device match the model, and the file changes for Linux. Nothing runs until you choose:
 
-- **Apply** (Cisco IOS): runs exactly these commands over SSH. It stops at the first command the device refuses. Tick **Save to startup-config** to run `write memory` after them. Then LabTracer reads the device again, so the drift report shows the result, and you see the transcript.
-- **Send to console** (all platforms): opens the SSH console of the device and pastes the commands without pressing Enter. Check them, then press Enter. On Linux this is the only way: `ip` and `hostnamectl` change the running system only, so also change the persistent config (`/etc/network/interfaces`, netplan or NetworkManager).
+- **Apply**: see below.
+- **Stage**: add it to the change set.
+- **Send to console** (all platforms): opens the SSH console of the device and pastes the commands without pressing Enter. Check them, then press Enter.
 - **Copy**: copies the commands.
 
-⚠ marks a push that can cut your connection to the device: a changed or removed address, a shutdown, a trunk or switchport mode change, a deleted VLAN or a default route. **push all** leaves these out. Before you apply one, make sure you can reach the device another way (console cable, another address).
+**Apply** runs these steps, and writes each of them to the audit log:
+
+1. **Backup.** LabTracer reads the device's config and keeps it (Drift tab › **Backups**). Where possible, it also keeps a copy on the device: `flash:lt-<id>.cfg` (IOS), `lt-<id>.backup` (RouterOS), `/var/backups/labtracer/<id>.tgz` (Linux).
+2. **Rollback timer** (when you set minutes): the device goes back to its old config by itself, unless LabTracer confirms the change in time.
+3. **Commands.** Exactly the reviewed commands. LabTracer stops at the first one that fails.
+4. **Check.** LabTracer connects again. If it can not, and the timer is on, the device rolls back by itself; the result says "rolls back by itself within N min".
+5. **Confirm**, or **restore**: when a command failed, LabTracer puts the backup back (clear "If the device refuses a command, put the backup back" to leave it as it is).
+6. **Save** (IOS): `write memory`, only after the confirmation.
+7. **Collect again**, so the drift report shows the result.
+
+How each platform keeps the change, and how it rolls back:
+
+| Platform | Persistent change | Rollback timer | Restore a backup |
+|---|---|---|---|
+| Cisco IOS | `write memory` after the confirmation. | With `archive` configured: `configure terminal revert timer N`, confirmed with `configure confirm`. Without: `reload in N` (the device restarts with its startup-config, which LabTracer does not change before the confirmation), cancelled with `reload cancel`. | `configure replace flash:lt-<id>.cfg force` |
+| Linux, ifupdown / ifupdown2 (Debian, Proxmox) | LabTracer edits `/etc/network/interfaces` (you see the diff); ifupdown2 applies it with `ifreload -a`, classic ifupdown also gets `ip` commands. LabTracer refuses to write when the file changed since the last collect. | A `systemd-run` timer runs a script that unpacks the backup, undoes the `ip` commands and reloads the network config. Confirmed with `systemctl stop`. | Unpacks the backup and reloads ifupdown2, netplan and NetworkManager. |
+| Linux, NetworkManager | `nmcli connection modify`, then `nmcli device reapply` (or `connection up` / `down`). | Same timer. | Same. |
+| Linux, netplan | `netplan set`, then `netplan apply`. Needs netplan 0.101 or later. | Same timer. | Same; netplan files added since the backup are removed. |
+| Linux, none of these | `ip` commands only; a note says that they are lost at the next reboot. | Same timer. | Same. |
+| MikroTik RouterOS | RouterOS keeps each change as soon as it accepts it. | A script that waits, then loads the backup (the router reboots). Confirmed by removing the script. | `/system backup load` (the router reboots). |
+
+For Linux, LabTracer must know how the host keeps its network config: collect the device once (with the current LabTracer) before a push. The commands start with `sudo -n` unless you log in as root; `sudo` must not ask for a password.
+
+⚠ marks a push that can cut your connection to the device: a changed or removed address, a shutdown, a trunk or switchport mode change, a deleted VLAN or a default route. **push all** leaves these out. For these, the rollback timer is on by default (5 minutes). Make sure you can reach the device another way (console cable, another address).
 
 The browser never sends command text to server.py. It sends operations (for example "access VLAN 20 on Gi0/3"). server.py checks every value, the driver writes the commands, and Apply runs only the reviewed list, once, within 10 minutes.
+
+The platform support for Push was tested on recorded and simulated device output (see the tests). Try a push on one device of each kind before you use it on many.
 
 ### Scheduled collect
 
@@ -454,6 +540,62 @@ Labels in the 3D view show `Δ` and the number of errors and warnings. The Inven
 **Compare config** shows the config that LabTracer generates from the model next to the config read from the device. **Save config to Configs** keeps a dated copy in the Configs tab.
 
 What the device reported is kept in `data/observed/<lab>/`, apart from the lab file. Drift needs server.py. It is not available when you open `index.html` directly.
+
+## Change sets and audit log
+
+A change set collects pushes for many devices, so you can review them as one change and apply them in a planned order.
+
+1. In the Drift tab of a device, click **stage** on a difference (or **stage all**, or **Stage** in the push review). The first stage starts a change set. The Drift tab shows "N staged".
+2. Stage changes on other devices. A second stage for the same device adds to its item.
+3. In the lab panel, under **Changes and audit**, click **Review and apply**. The review shows, for each device in order, the changes, the commands, the file diffs and the notes. You can:
+   - give the change a title and a note (why, ticket, maintenance window);
+   - move a device up or down (for example: change the access switches first, the core switch last);
+   - remove a change or a device;
+   - set the rollback timer, what to do when a device refuses a command, and **Stop at the first device that fails**;
+   - **Discard** the change set.
+4. Click **Apply to N device(s)**. LabTracer applies the devices one after the other, each with the steps of [Apply](#push-the-model-to-a-device). With **Stop at the first device that fails**, the next devices are skipped. The review then shows each device's result, backup and transcript.
+
+server.py keeps the change sets in `data/changes/<lab>/`. A change set can only be applied in the version you reviewed: if it changed since (another window), LabTracer asks you to review it again. An applied or discarded change set can not change any more; **History** lists them all with their results.
+
+### Audit log
+
+`data/audit/<lab>.jsonl` gets one line for each event: change sets created, staged, edited, discarded and applied; backups; rollback timers; applies (with the commands, the files and the transcript); confirmations, rollbacks, restores and saves; discoveries; remote sessions. Each line has the time, the user who runs LabTracer, the device and the result.
+
+Open it with **Audit log** in the lab panel, or **Audit** in the Drift tab of a device (that device only). **Export** saves it as JSON Lines. Each entry holds the hash of the entry before it, so the viewer shows when a line was changed or removed ("chain intact"). This shows tampering; it does not prevent it.
+
+## Backups and recovery
+
+Before each change it applies, LabTracer keeps the config of the device in `data/backups/<lab>/<device>/` (the newest 30 per device). In the Drift tab, click **Backups** to see them:
+
+- **view**: the config (Linux: the network config files). **Download** saves it.
+- **restore**: puts the backup back on the device (see the table above), then reads the device again.
+
+If a device can not be reached after a change:
+
+1. With a rollback timer, wait until the timer ends: the device goes back to its old config by itself (IOS without archive: it restarts). Then click **Collect now**.
+2. Without a timer, reach the device another way (console cable, another address). The backup has the old config: on IOS, `configure replace flash:lt-<id>.cfg force`; on Linux, `tar -xzf /var/backups/labtracer/<id>.tgz -C /` then reload the network config; on RouterOS, `/system backup load name=lt-<id>.backup`.
+
+## Remote access (Guacamole)
+
+LabTracer can open RDP, VNC, SSH and Telnet sessions in a window of the app, over Apache Guacamole:
+
+```
+browser (Guacamole client)  <-- WebSocket -->  server.py  <-- TCP 4822 -->  guacd  <-- RDP / VNC / SSH / Telnet -->  device
+```
+
+Only guacd, the Guacamole server daemon, is needed: no Tomcat, no Guacamole web app, no database. server.py speaks the Guacamole protocol to guacd itself.
+
+1. Start guacd on this PC or on a server: `docker run -d -p 127.0.0.1:4822:4822 guacamole/guacd`, or install the `guacd` package.
+2. In the lab panel, under **Remote access (Guacamole)**, set the guacd address (default `127.0.0.1:4822`). Click **Test**.
+3. Select a device. Open the Console tab and click **Remote**.
+4. Set the protocol, host (empty: the SSH host or the first IP), port (0: the default for the protocol), user and, for RDP, the domain, security mode and keyboard layout.
+5. Click **Connect**. Type the password (or leave it empty to log in on the remote screen).
+
+The session opens in a window that you can move (drag the title bar) and resize (drag the corner; an RDP desktop follows the size). Click the screen to type into it. The window has the buttons **Ctrl+Alt+Del**, **Win** (the Windows key), **Paste…** (sends text to the remote clipboard; text copied on the remote side goes to your clipboard) and **Fit** (scale to the window, or 100%). Several sessions can be open at once (at most 8). Each session start and end goes into the audit log.
+
+guacd connects to the device, so it must reach the device's address. If guacd runs on another computer, protect port 4822 (a firewall rule, or TLS: guacd `-C` and `-K`, then tick "guacd uses TLS").
+
+The Guacamole client (`app/guac.js`, 73 KB) loads only when you open the first session.
 
 ## Custom objects
 
@@ -528,6 +670,11 @@ If the app is slow:
 - Collect and Push (drift) use the same rules as the SSH console: off on a network address, passwords used for one run only, new host keys confirmed by you. Collect only reads devices.
 - Push takes operations, not command text, from the browser. Each value is checked against a strict pattern (interface names, addresses, VLAN numbers and lists, names), and the device driver writes the commands. Apply runs a reviewed plan once, within 10 minutes.
 - The live events WebSocket (`/api/events`) checks the Origin like the SSH console. It carries no secrets.
+- A change set is applied only in the version you reviewed (a digest of every device's commands and files). Each change is logged with its commands and transcript in a hash-chained audit log.
+- Linux push: LabTracer writes a config file only when it is the same as at the last collect, and stops at the first command that fails. It needs root or `sudo -n`; it never asks for or stores a sudo password.
+- Discovery uses the same rules as Collect: off on a network address, read-only, passwords for one run only. It sweeps only the ranges you type; with Crawl, also the private addresses that your devices report. "Trust the host key of devices seen for the first time" is off by default, and each key it saves is logged.
+- Remote access (Guacamole) uses the same rules as the SSH console: off on a network address, a one-time session id, an Origin check, passwords for one connect only. The connection parameters come from a fixed list: drive mapping, printing, session recording and SFTP, which write files on the guacd host, can not be turned on. The browser may only send input and display instructions to guacd.
+- Monitoring backends are read-only. Their tokens and passwords are kept in `data/monitor.json`, like the agent token.
 
 ## Git
 
@@ -535,7 +682,7 @@ The `.gitignore` ignores all files, then allows only the files of the app. This 
 
 These items are never committed:
 
-- The `data` folder: labs, lab history, custom objects, exported configs, agent address and token, SSH host keys, facts collected from devices.
+- The `data` folder: labs, lab history, custom objects, exported configs, agent address and token, monitoring credentials, SSH host keys, facts collected from devices, discovery results, change sets, backups of device configs and the audit log.
 - `node_modules`.
 - `agent/agent.json` and `agent/targets.json`.
 - Certificates and keys (`*.pem`, `*.key`, `*.crt`, `*.p12`), `.env` files and files with `.local.` in the name.
@@ -555,10 +702,10 @@ Do this only if you change files in `src/`.
 
 1. Install Node.js 18 or later.
 2. Run `npm install`.
-3. Run `npm run build`. This writes `app/app.js` and `app/app.css`.
+3. Run `npm run build`. This writes `app/app.js`, `app/app.css` and `app/guac.js` (the Guacamole client, loaded only for a remote session).
 4. Optional: run `npm run dev` to rebuild on each change. This build is not minified and has a source map. Run `npm run build` again before you commit.
 
-`app/app.js` and `app/app.css` are in git, so the app runs without Node.js. Commit them together with the `src/` change that made them:
+`app/app.js`, `app/app.css` and `app/guac.js` are in git, so the app runs without Node.js. Commit them together with the `src/` change that made them:
 
 - `npm test` fails if they are not the build of the current `src/`. To check only this, run `npm run check:build`.
 - `git diff` shows them as binary (see `.gitattributes`), so the diffs show only your source changes.
@@ -582,9 +729,9 @@ The tests are in the `tests` folder. They never use your `data` folder: the serv
 
 | Command | What it tests | Needs |
 |---|---|---|
-| `npm test` | `app/` matches `src/`; undo and redo (diff and patch, 300 random edits); format versions and migrations (every old file in `tests/fixtures` still opens); inventory: CSV parsing, import, export round trip; the drift report; the Nagios export. | Node.js 18 or later, and `npm install`. |
-| `npm run test:py` | server.py guards and save conflicts, ssh_bridge.py, the check agent and its Nagios source, the live events WebSocket, the collector drivers (on recorded device output), push: operation checks, IOS commands, apply on a simulated IOS CLI. | Python 3.8 or later. The agent TLS test also needs the `openssl` command (it is skipped without it). |
-| `npm run test:ui` | The app in a headless browser: every view, panel and tab, inventory, import, undo and redo, two-window saves, a damaged lab file. | `npm install`, Python 3, and Edge, Chrome or Chromium. |
+| `npm test` | `app/` matches `src/`; undo and redo (diff and patch, 300 random edits); format versions and migrations (every old file in `tests/fixtures` still opens); inventory: CSV parsing, import, export round trip; the drift report; the Nagios export; discovery to lab (devices, ports, cables from LLDP and MAC tables). | Node.js 18 or later, and `npm install`. |
+| `npm run test:py` | server.py guards and save conflicts, ssh_bridge.py, the check agent and its Nagios source, the live events WebSocket, the collector drivers (on recorded device output), push: operation checks, IOS commands, apply on a simulated IOS CLI; change sets, backups, rollback timers and restore (multi-device apply, unreachable device); the Linux persistent push (ifupdown2, NetworkManager, netplan) on a simulated host; the RouterOS driver; the IOS backup and timer questions; the audit log chain; the Guacamole tunnel (handshake, relay, refused instructions) with a fake guacd; the Prometheus, Zabbix, Icinga 2 and LibreNMS backends with a fake API; discovery helpers. | Python 3.8 or later. The agent TLS test also needs the `openssl` command (it is skipped without it). |
+| `npm run test:ui` | The app in a headless browser: every view, panel and tab, inventory, import, undo and redo, two-window saves, a damaged lab file, push review, staging and the audit log, the remote access form. | `npm install`, Python 3, and Edge, Chrome or Chromium. |
 | `npm run test:all` | All of the above. | All of the above. |
 
 Without Node.js, run the Python tests with `python -m unittest discover -s tests -v`.
@@ -599,9 +746,11 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 |---|---|
 | `server.py` | Local server and storage API. |
 | `ssh_bridge.py` | SSH console: WebSocket, paramiko and System ssh engines. |
-| `collector/` | Collect and push for the drift report: jobs and plans (`__init__.py`), SSH commands (`conn.py`), the facts format that every driver fills (`facts.py`), stored facts (`store.py`), push operations and their checks (`ops.py`), one driver per platform (`drivers/`: detect, read, render commands, apply). |
-| `app/` | The built web app (`index.html`, `style.css`, `app.js`). |
-| `build.mjs` | Build of `app/app.js` from `src/`, and the check that they match. |
+| `guac.py` | Remote access: the Guacamole protocol to guacd, and the WebSocket tunnel for the browser. |
+| `monitoring.py` | Monitoring backends (Prometheus, Zabbix, Icinga 2, LibreNMS) in the agent's status format. |
+| `collector/` | Collect and push for the drift report: jobs and plans (`__init__.py`), SSH commands (`conn.py`), the facts format that every driver fills (`facts.py`), stored facts (`store.py`), push operations and their checks (`ops.py`), one driver per platform (`drivers/`: detect, read, render commands, apply, backup, rollback timer, restore), change sets (`changes.py`), backups (`backups.py`), the audit log (`audit.py`), discovery (`discover.py`). |
+| `app/` | The built web app (`index.html`, `style.css`, `app.js`, and `guac.js`: the Guacamole client, loaded only for a remote session). |
+| `build.mjs` | Build of `app/app.js` and `app/guac.js` from `src/`, and the check that they match. |
 | `src/main.js` | App state, save, selection, views, keyboard. |
 | `src/main/` | App features: placing devices (`placement.js`), the link tool (`linking.js`), edits (`edits.js`), the File menu (`files.js`), the Settings dialog (`settings.js`). |
 | `src/history.js` | Undo and redo. Each step keeps only the changes (`src/patch.js`). |
@@ -619,7 +768,10 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 | `src/templates.js` | Built-in device types. |
 | `src/sample.js` | Example lab (placeholder names and addresses). |
 | `src/store.js` | Storage (server or browser). |
-| `src/monitor.js` | Live status from the check agent. |
+| `src/monitor.js` | Live status from the check agent or a monitoring backend. |
+| `src/discover.js` | Discovery: the dialogs, and the lab made from a discovery result. |
+| `src/changes.js` | Change sets (stage, review, apply), the audit log viewer, backups and restore. |
+| `src/remote.js` | Remote access windows (Guacamole client). `src/guac-entry.js` builds `app/guac.js`. |
 | `src/inventory.js` | Inventory table, CSV import and export. |
 | `src/sshterm.js` | SSH console in the browser (xterm.js). |
 | `src/drift.js` | Drift report: compares the model with the facts read from a device. |
@@ -630,10 +782,10 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 | `src/diff.js` | Line diff for config snapshots and Compare config. |
 | `src/util.js` | Shared helpers: DOM building, ids, IP math, `mixin()`. |
 | `agent/` | The check agent, its systemd unit and its instructions. |
-| `tests/` | Tests: `build.test.mjs`, `history.test.mjs`, `migrations.test.mjs`, `inventory.test.mjs`, `drift.test.mjs`, `nagios.test.mjs` (Node), `test_server.py`, `test_collector.py`, `test_remediate.py` (Python, started by `run-py.mjs`), `ui.test.mjs` (browser). |
+| `tests/` | Tests: `build.test.mjs`, `history.test.mjs`, `migrations.test.mjs`, `inventory.test.mjs`, `drift.test.mjs`, `nagios.test.mjs`, `discover.test.mjs` (Node), `test_server.py`, `test_collector.py`, `test_remediate.py`, `test_ops.py` (Python, started by `run-py.mjs`), `ui.test.mjs` (browser). |
 | `tests/collect-fixtures/` | Recorded device output and the facts the drivers must make from it (`python tests/test_collector.py --regen` updates the facts after a deliberate parser change). |
 | `tests/fixtures/` | One saved lab and library for each format version. Frozen: never edit them. |
 
 Each file in `src/main/`, `src/inspector/` and `src/viewport/` holds a part class. `mixin()` in `src/util.js` copies its methods onto `App`, `Inspector` or `Viewport`. A method name can be in only one file: a duplicate stops the app at startup with an error.
 
-Three.js and xterm.js (MIT licence) are bundled into `app/app.js` and `app/app.css`.
+Three.js and xterm.js (MIT licence) are bundled into `app/app.js` and `app/app.css`. The Apache Guacamole client (guacamole-common-js 1.5.0, Apache License 2.0) is bundled into `app/guac.js`.

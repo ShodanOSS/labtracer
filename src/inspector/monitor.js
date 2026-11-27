@@ -37,8 +37,8 @@ export class MonitorPanels {
         h('span', { class: 'muted small' }, `since ${fmtTime(st.since * 1000)}`)),
       st.nagiosState === 'UNREACHABLE' ? h('p', { class: 'muted small' }, 'UNREACHABLE: a parent of this host is down, so Nagios can not tell whether this host is up.') : null,
       h('div', { class: 'checks' }, st.checks.map(x => h('div', { class: 'chkrow' + (x.ok ? '' : ' bad'), title: x.output || '' },
-        h('span', { class: 'dot' }), h('span', { class: 'mono' }, x.type === 'ping' ? `ping ${x.host}` : x.type === 'nagios' ? x.label : `${x.host}:${x.port}`),
-        h('span', { class: 'muted' }, x.type === 'nagios' ? (x.state || '') : (x.label || '')),
+        h('span', { class: 'dot' }), h('span', { class: 'mono' }, x.type === 'ping' ? `ping ${x.host}` : x.type === 'tcp' ? `${x.host}:${x.port}` : x.label),
+        h('span', { class: 'muted' }, x.type === 'ping' || x.type === 'tcp' ? (x.label || '') : (x.state || '')),
         h('span', { class: 'mono' }, x.ok ? (x.ms === null || x.ms === undefined ? 'OK' : `${x.ms} ms`) : x.err)))),
       h('h4', null, `Last ${st.history.length} runs`),
       h('div', { class: 'spark', html: sparkline(st.history) || '<span class="muted small">Needs two runs.</span>' }));
@@ -47,27 +47,38 @@ export class MonitorPanels {
   monitorSection() {
     const app = this.app, m = app.monitor;
     if (!m.available) return h('p', { class: 'muted small' }, 'Live status needs server.py. It is not available when index.html is opened directly.');
-    const url = h('input', { class: 'inp mono', 'data-k': 'mon-url', value: m.config.agentUrl || '', placeholder: 'http://192.168.10.10:8766' });
-    const tok = h('input', { class: 'inp mono', 'data-k': 'mon-tok', type: 'password', autocomplete: 'off', placeholder: m.config.hasToken ? 'saved (leave empty to keep)' : 'paste the agent token' });
+    const backend = this.monBackend || m.config.backend || 'agent';
+    const isAgent = backend === 'agent';
+    const HINT = { prometheus: 'http://prometheus:9090', zabbix: 'https://zabbix.example/zabbix', icinga2: 'https://icinga:5665', librenms: 'http://librenms' };
+    const SECRET = { prometheus: 'bearer token or password (optional)', zabbix: 'API token (Zabbix 5.4 or later)', icinga2: 'API user password', librenms: 'API token' };
+    const pick = h('select', { class: 'inp', 'data-k': 'mon-backend', onchange: e => { this.monBackend = e.target.value; this.render(); } },
+      Object.entries(m.config.backends || { agent: 'LabTracer agent' }).map(([v, l]) => h('option', { value: v, selected: v === backend ? 'selected' : null }, l)));
+    const url = h('input', { class: 'inp mono', 'data-k': 'mon-url', value: (isAgent ? m.config.agentUrl : m.config.url) || '', placeholder: isAgent ? 'http://192.168.10.10:8766' : HINT[backend] });
+    const user = h('input', { class: 'inp mono', 'data-k': 'mon-user', value: m.config.user || '', placeholder: backend === 'icinga2' ? 'API user' : 'user (basic auth, optional)' });
+    const tok = h('input', { class: 'inp mono', 'data-k': 'mon-tok', type: 'password', autocomplete: 'off',
+      placeholder: (isAgent ? m.config.hasToken : m.config.hasSecret) ? 'saved (leave empty to keep)' : (isAgent ? 'paste the agent token' : SECRET[backend]) });
     const ca = h('input', { class: 'inp mono', 'data-k': 'mon-ca', value: m.config.cafile || '', placeholder: 'optional: path to your CA .pem (HTTPS)' });
     const insecure = h('input', { type: 'checkbox', checked: m.config.insecure });
     const save = async () => {
-      const body = { agentUrl: url.value.trim(), cafile: ca.value.trim(), insecure: insecure.checked };
-      if (tok.value.trim()) body.token = tok.value.trim();
-      await m.saveConfig(body); tok.value = '';
+      const body = { backend, cafile: ca.value.trim(), insecure: insecure.checked };
+      if (isAgent) body.agentUrl = url.value.trim(); else { body.url = url.value.trim(); body.user = user.value.trim(); }
+      if (tok.value.trim()) body[isAgent ? 'token' : 'secret'] = tok.value.trim();
+      await m.saveConfig(body); tok.value = ''; this.monBackend = null;
     };
     const st = m.status;
     const counts = { up: 0, degraded: 0, down: 0, unknown: 0 };
     for (const v of m.states().values()) counts[v] = (counts[v] || 0) + 1;
     const bad = [...m.states()].filter(([, v]) => v === 'down' || v === 'degraded');
     return h('div', null,
-      h('label', { class: 'fld' }, h('span', null, 'Agent address'), url),
-      h('div', { class: 'row2' }, h('label', { class: 'fld' }, h('span', null, 'Token'), tok), h('label', { class: 'fld' }, h('span', null, 'CA file (HTTPS)'), ca)),
+      h('label', { class: 'fld' }, h('span', null, 'Status from'), pick),
+      h('label', { class: 'fld' }, h('span', null, isAgent ? 'Agent address' : 'URL'), url),
+      !isAgent && backend !== 'zabbix' && backend !== 'librenms' ? h('label', { class: 'fld' }, h('span', null, 'User'), user) : null,
+      h('div', { class: 'row2' }, h('label', { class: 'fld' }, h('span', null, isAgent ? 'Token' : 'Secret'), tok), h('label', { class: 'fld' }, h('span', null, 'CA file (HTTPS)'), ca)),
       h('label', { class: 'chk' }, insecure, 'Skip TLS certificate check (not recommended)'),
       h('div', { class: 'btnrow' },
-        h('button', { class: 'btn small', onclick: async () => { try { await save(); toast('Agent settings saved', 'ok'); } catch (e) { toast(e.message, 'err'); } } }, 'Save'),
+        h('button', { class: 'btn small', onclick: async () => { try { await save(); toast('Monitoring settings saved', 'ok'); } catch (e) { toast(e.message, 'err'); } } }, 'Save'),
         h('button', { class: 'btn small', onclick: async () => {
-          try { await save(); const r = await fetch('/api/monitor/status', { cache: 'no-store' }); const j = await r.json(); if (!r.ok) throw new Error(j.error); toast(`Connected: ${j.host}, agent ${j.version}, ${j.targets} target(s), every ${j.interval}s`, 'ok', 4000); }
+          try { await save(); const r = await fetch('/api/monitor/status', { cache: 'no-store' }); const j = await r.json(); if (!r.ok) throw new Error(j.error); toast(`Connected: ${j.host}, ${j.version}${j.error ? ' (' + j.error + ')' : ''}, ${j.targets} target(s)${j.monitoredHosts ? `, ${j.monitoredHosts.length} monitored host(s)` : ''}`, 'ok', 5000); }
           catch (e) { toast('Test failed: ' + e.message, 'err', 5000); }
         } }, 'Test'),
         h('button', { class: 'btn small', onclick: async () => { try { await save(); await m.push(); } catch (e) { toast('Push failed: ' + e.message, 'err', 5000); } } }, 'Send targets'),
@@ -75,10 +86,11 @@ export class MonitorPanels {
       m.error ? h('div', { class: 'warn small' }, 'Agent: ' + m.error) : null,
       m.live && m.status?.error ? h('div', { class: 'warn small' }, 'Agent: ' + m.status.error) : null,
       m.live && m.status?.source === 'nagios' ? h('p', { class: 'muted small' }, `Results from Nagios (${(m.status.nagiosHosts || []).length} hosts in Nagios).`) : null,
+      m.live && m.status?.monitoredHosts && m.status.source !== 'nagios' ? h('p', { class: 'muted small' }, `Results from ${m.status.version}: ${m.status.monitoredHosts.length} monitored host(s), ${Object.keys(m.status.devices || {}).length} matched to lab devices (by address, then name).`) : null,
       m.live && st ? h('div', null,
         h('p', { class: 'small' }, h('span', { class: 'ok' }, `${counts.up} up`), ' · ', h('span', { class: 'warn' }, `${counts.degraded} degraded`), ' · ', h('span', { class: 'err' }, `${counts.down} down`),
           h('span', { class: 'muted' }, ` · agent ${st.host}, last run ${st.generated ? new Date(st.generated * 1000).toLocaleTimeString() : 'never'}`)),
         bad.length ? h('div', { class: 'chips' }, bad.map(([id, v]) => { const d = devById(app.lab, id); return d ? h('span', { class: 'chip st-' + v }, h('button', { class: 'chip-name', onclick: () => { this.tab = 'monitor'; app.select({ type: 'device', id }); } }, d.name)) : null; })) : null) : null,
-      h('p', { class: 'muted small' }, 'The agent pings each device and connects to TCP service ports. See agent/README.md to install it.'));
+      h('p', { class: 'muted small' }, isAgent ? 'The agent pings each device and connects to TCP service ports, or shows the results of Nagios. See agent/README.md to install it.' : 'LabTracer reads host and service states from this system (read-only). Devices are matched by their monitor address, then by name.'));
   }
 }

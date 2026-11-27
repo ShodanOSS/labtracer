@@ -30,7 +30,9 @@ export class DriftTab {
       h('div', { class: 'btnrow' },
         h('button', { class: 'btn small primary', disabled: col.running || !host ? true : null, onclick: () => col.run([d]) }, busy ? 'Collecting…' : 'Collect now'),
         f?.rawConfig ? h('button', { class: 'btn small', title: 'The config LabTracer generates from the model, next to the config read from the device', onclick: () => this.showDiff(runningConfig(app.lab, d), f.rawConfig, `${d.name}: generated from the model → read from the device`) }, 'Compare config') : null,
-        f?.rawConfig ? h('button', { class: 'btn small', title: `Keep a dated copy in the Configs tab (${COLLECTED_FILE})`, onclick: () => this.keepCollectedConfig(d, f) }, 'Save config to Configs') : null));
+        f?.rawConfig ? h('button', { class: 'btn small', title: `Keep a dated copy in the Configs tab (${COLLECTED_FILE})`, onclick: () => this.keepCollectedConfig(d, f) }, 'Save config to Configs') : null,
+        h('button', { class: 'btn small', title: 'Configs kept before each change LabTracer applied; restore one', onclick: () => app.changes.backups(d) }, 'Backups'),
+        h('button', { class: 'btn small', title: 'Every change, backup, rollback and remote session for this device', onclick: () => app.changes.audit(d.id) }, 'Audit')));
     if (st?.state === 'error') ap(el, h('div', { class: 'warn small' }, 'Last run failed: ' + st.error));
     if (st?.state === 'hostkey') ap(el, h('div', { class: 'warn small' }, `Host key of ${st.host} was not trusted. Collect again to compare the fingerprint.`));
     if (!f) {
@@ -51,7 +53,9 @@ export class DriftTab {
       acceptable.length > 1 ? h('button', { class: 'mini txt', title: 'Change the model to match the device for every item below', onclick: async () => {
         if (await confirmBox('Accept all', `Change the model to match the device for ${acceptable.length} item(s)? You can undo this (Ctrl+Z).`, 'Accept all')) col.accept(d, acceptable);
       } }, `accept all (${acceptable.length})`) : null,
-      pushable.length > 1 ? h('button', { class: 'mini txt', title: 'Make the device match the model for every item below that can not cut the connection. You review the commands first.', onclick: () => col.reviewPush(d, pushable) }, `push all (${pushable.length})`) : null));
+      pushable.length > 1 ? h('button', { class: 'mini txt', title: 'Make the device match the model for every item below that can not cut the connection. You review the commands first.', onclick: () => col.reviewPush(d, pushable) }, `push all (${pushable.length})`) : null,
+      pushable.length > 1 ? h('button', { class: 'mini txt', title: 'Add these changes to the change set, to apply them later with changes on other devices', onclick: () => app.changes.stage(d, pushable) }, `stage all (${pushable.length})`) : null),
+      this.stagedLine(d));
 
     for (const [area, label] of AREAS) {
       const list = shown.filter(it => it.area === area);
@@ -77,7 +81,15 @@ export class DriftTab {
       h('span', { class: 'btnrow tight' },
         it.accept && !it.ignored ? h('button', { class: 'mini txt', title: 'Change the model to match the device', onclick: () => col.accept(d, [it]) }, it.accept.label) : null,
         it.push && !it.ignored ? h('button', { class: 'mini txt push' + (it.push.danger ? ' danger' : ''), title: `Change the device to match the model: ${it.push.label}${it.push.danger ? '. This can cut the connection to the device.' : ''}`, onclick: () => col.reviewPush(d, [it]) }, (it.push.danger ? '⚠ ' : '') + 'push') : null,
+        it.push && !it.ignored ? h('button', { class: 'mini txt', title: `Add to the change set: ${it.push.label}`, onclick: () => this.app.changes.stage(d, [it]) }, 'stage') : null,
         h('button', { class: 'mini', title: it.ignored ? 'Show this difference again' : 'Ignore: an expected difference', onclick: () => col.setIgnored(d, it.key, !it.ignored) }, it.ignored ? '↺' : '×')));
+  }
+
+  stagedLine(d) {
+    const ch = this.app.changes, it = ch.staged(d.id);
+    if (!it) return null;
+    return h('div', { class: 'small stline' }, h('span', { class: 'stbadge st-degraded' }, `${(it.labels || []).length || it.ops.length} staged`),
+      h('span', { class: 'muted' }, ` in "${ch.current.title}"`), h('button', { class: 'mini txt', onclick: () => ch.review() }, 'review'));
   }
 
   keepCollectedConfig(d, f) {

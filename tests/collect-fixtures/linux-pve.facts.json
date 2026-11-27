@@ -140,7 +140,8 @@
    "localPort": "eno1",
    "remoteName": "rack-switch",
    "remotePort": "Gi0/2",
-   "remoteMac": "00:1b:54:aa:bb:cc"
+   "remoteMac": "00:1b:54:aa:bb:cc",
+   "remoteIp": "192.168.10.2"
   }
  ],
  "listening": [
@@ -171,5 +172,40 @@
    "state": "stopped"
   }
  ],
+ "arp": [
+  {
+   "ip": "192.168.20.1",
+   "mac": "00:14:bf:aa:bb:01",
+   "dev": "vmbr0"
+  },
+  {
+   "ip": "192.168.20.30",
+   "mac": "a4:bb:6d:11:22:99",
+   "dev": "vmbr0"
+  }
+ ],
+ "macTable": [
+  {
+   "mac": "52:54:00:aa:00:01",
+   "vlan": null,
+   "port": "tap100i0"
+  },
+  {
+   "mac": "00:14:bf:aa:bb:01",
+   "vlan": null,
+   "port": "eno1"
+  }
+ ],
+ "platform": {
+  "uid": 0,
+  "sudo": false,
+  "ifupdown": true,
+  "ifreload": true,
+  "netplan": false,
+  "nm": {},
+  "systemdRun": true,
+  "hostnamectl": true,
+  "interfacesFile": "auto lo\niface lo inet loopback\n\niface eno1 inet manual\n\niface eno2 inet manual\n\nauto vmbr0\niface vmbr0 inet static\n\taddress 192.168.20.11/24\n\tgateway 192.168.20.1\n\tbridge-ports eno1\n\tbridge-stp off\n\tbridge-fd 0\n\nsource /etc/network/interfaces.d/*\n"
+ },
  "rawConfig": ""
 }

@@ -3,10 +3,45 @@
 import { h, ap, uid, intToIp } from '../util.js';
 import { deviceRoomId, isDeployed } from '../model.js';
 import { l3Ifaces, duplicateIps } from '../netsim.js';
-import { confirmBox } from '../dialogs.js';
+import { confirmBox, toast } from '../dialogs.js';
 import { CABLE_ROUTES } from '../viewport/cables.js';
 
 export class LabPanel {
+  changesSection() {
+    const ch = this.app.changes;
+    if (!ch.available) return h('p', { class: 'muted small' }, 'Changes need server.py.');
+    const cur = ch.current;
+    return h('div', null,
+      cur ? h('p', { class: 'small' }, h('b', null, cur.title), ` · ${cur.items.length} device(s), ${cur.items.reduce((n, it) => n + (it.labels || []).length, 0)} change(s) staged`)
+        : h('p', { class: 'muted small' }, 'Nothing staged. In the Drift tab of a device, "stage" adds a change here, so you can review and apply changes on many devices together.'),
+      h('div', { class: 'btnrow' },
+        cur ? h('button', { class: 'btn small primary', onclick: () => ch.review() }, 'Review and apply') : h('button', { class: 'btn small', onclick: () => ch.newDraft() }, 'New change set'),
+        h('button', { class: 'btn small', onclick: () => ch.history() }, 'History'),
+        h('button', { class: 'btn small', onclick: () => ch.audit() }, 'Audit log')));
+  }
+
+  remoteSection() {
+    const app = this.app, rm = app.remote;
+    if (!rm.available) return h('p', { class: 'muted small' }, 'Remote access needs server.py.');
+    const addr = h('input', { class: 'inp mono', 'data-k': 'guacd', value: rm.config?.guacd || '127.0.0.1:4822', placeholder: '127.0.0.1:4822' });
+    const tls = h('input', { type: 'checkbox', checked: rm.config?.tls });
+    if (!rm.config) fetch('/api/remote/config', { cache: 'no-store' }).then(r => r.json()).then(c => { rm.config = c; addr.value = c.guacd; tls.checked = c.tls; }).catch(() => {});
+    const save = async () => {
+      const r = await fetch('/api/remote/config', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-LabTracer': '1' }, body: JSON.stringify({ guacd: addr.value.trim(), tls: tls.checked }) });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); rm.config = j;
+    };
+    return h('div', null,
+      h('label', { class: 'fld' }, h('span', null, 'guacd address'), addr, h('small', null, 'Apache Guacamole server daemon. For example: docker run -d -p 127.0.0.1:4822:4822 guacamole/guacd')),
+      h('label', { class: 'chk' }, tls, 'guacd uses TLS (guacd -C / -K)'),
+      h('div', { class: 'btnrow' },
+        h('button', { class: 'btn small', onclick: async () => { try { await save(); toast('Saved', 'ok'); } catch (e) { toast(e.message, 'err'); } } }, 'Save'),
+        h('button', { class: 'btn small', onclick: async () => {
+          try { await save(); const r = await fetch('/api/remote/test', { method: 'POST', headers: { 'X-LabTracer': '1' } }); const j = await r.json();
+            toast(j.ok ? `guacd answers (${j.version || 'version ?'})` : 'guacd: ' + j.error, j.ok ? 'ok' : 'err', 6000); } catch (e) { toast(e.message, 'err'); }
+        } }, 'Test')),
+      h('p', { class: 'muted small' }, 'Open a session in the Console tab of a device › Remote: RDP, VNC, SSH or Telnet in a window you can move and resize. No Guacamole web app or database is needed.'));
+  }
+
   renderLab() {
     const app = this.app, lab = app.lab;
     const body = h('div', { class: 'insp-body', 'data-scroll': 'lab' });
@@ -32,9 +67,12 @@ export class LabPanel {
         hint: 'A link can override this. Cables inside one rack and leads under 0.5 m always hang.' }));
 
     // monitoring
-    ap(body, h('h4', null, 'Monitoring agent'), this.monitorSection());
+    ap(body, h('h4', null, 'Monitoring'), this.monitorSection());
+    ap(body, h('h4', null, 'Discover network'), app.discover.section());
     ap(body, h('h4', null, 'Drift: model vs devices'), this.driftSection());
+    ap(body, h('h4', null, 'Changes and audit'), this.changesSection());
     ap(body, h('h4', null, 'Nagios'), this.nagiosSection());
+    ap(body, h('h4', null, 'Remote access (Guacamole)'), this.remoteSection());
 
     // unplaced
     // deployed kit with no room; spares, parts and items with a storage location are not "missing"

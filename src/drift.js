@@ -20,7 +20,7 @@ export const AREAS = [['identity', 'Identity'], ['inventory', 'Inventory'], ['in
   ['switchport', 'Switch ports'], ['vlan', 'VLANs'], ['route', 'Routes'], ['link', 'Cabling (LLDP / CDP)'], ['service', 'Services'], ['guest', 'Guests (VMs / containers)']];
 export const SEV_ORDER = { error: 0, warn: 1, info: 2 };
 export const DRIVERS = [['auto', 'Detect'], ['linux', 'Linux / Proxmox / DD-WRT'], ['ios', 'Cisco IOS'],
-  ['routeros', 'MikroTik RouterOS (later)'], ['windows', 'Windows (later)'], ['opnsense', 'OPNsense (later)'], ['unifi', 'UniFi (later)']];
+  ['routeros', 'MikroTik RouterOS'], ['windows', 'Windows (later)'], ['opnsense', 'OPNsense (later)'], ['unifi', 'UniFi (later)']];
 
 /** Per-device collection settings (stored only when the user changes them). */
 export const collectConf = d => Object.assign({ enabled: !!d.ssh, driver: 'auto', ignore: [] }, d.collect || {});
@@ -60,7 +60,7 @@ function vlanKey(spec) {
 }
 
 // Interfaces the OS makes on its own (containers, VM taps, firewall bridges): never "missing from the model".
-const NOISE = /^(lo$|veth|docker\d|br-[0-9a-f]{6,}|tap\d|fwpr|fwln|fwbr|virbr|vnet\d|cali|flannel|cni|kube|tailscale|zt|dummy|ip6tnl|sit\d|gre0|gretap0|erspan0|ip_vti|ifb|nlmon|bonding_masters|nullnull)/i;
+export const NOISE = /^(lo$|veth|docker\d|br-[0-9a-f]{6,}|tap\d|fwpr|fwln|fwbr|virbr|vnet\d|cali|flannel|cni|kube|tailscale|zt|dummy|ip6tnl|sit\d|gre0|gretap0|erspan0|ip_vti|ifb|nlmon|bonding_masters|nullnull)/i;
 // Ports in the model that the OS never shows (out-of-band management).
 const OOB = /^(ipmi|bmc|idrac|ilo|imm|oob|mgmt-oob)\d*$/i;
 const COMPARED_KINDS = L3_KINDS; // data ports; power, console, USB and video are physical only
@@ -238,7 +238,7 @@ export function compareDevice(lab, d, facts) {
 }
 
 /** A model port for an interface found on the device. */
-function portFromFact(dev, fi) {
+export function portFromFact(dev, fi) {
   const kind = PORT_KINDS.has(fi.kind) ? fi.kind : 'eth';
   const p = makePort({ name: fi.name, kind, ip: (fi.ips || []).find(a => !/^127\./.test(a)) || (fi.dhcp ? 'dhcp' : ''), mac: fi.mac || '', enabled: fi.adminUp !== false, desc: fi.desc || '' });
   if (kind === 'sub' || kind === 'svi') p.vlan = fi.vlan || p.vlan;

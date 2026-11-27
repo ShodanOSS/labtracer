@@ -39,7 +39,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import collector
+import guac
+import monitoring
 import ssh_bridge
+from collector import audit, backups, changes, discover
 from collector import store as observed
 
 ROOT = Path(__file__).resolve().parent
@@ -165,6 +168,28 @@ def monitor_cfg():
         return {"agentUrl": "", "token": "", "cafile": "", "insecure": False}
 
 
+_targets = []  # what the GUI last sent, for the backends that are not the agent (monitoring.py)
+
+
+def monitor_status():
+    """Status in the agent format, from the configured backend."""
+    cfg = monitor_cfg()
+    if (cfg.get("backend") or "agent") == "agent":
+        return agent_call("GET", "/status")
+    return monitoring.status(cfg, _targets)
+
+
+def monitor_targets(targets):
+    global _targets
+    cfg = monitor_cfg()
+    if (cfg.get("backend") or "agent") == "agent":
+        return agent_call("PUT", "/targets", targets)
+    if not isinstance(targets, list):
+        raise ValueError("targets must be a list")
+    _targets = [t for t in targets if isinstance(t, dict) and t.get("id")][:2000]
+    return {"ok": True, "targets": len(_targets)}
+
+
 def agent_call(method, path, body=None, timeout=6):
     cfg = monitor_cfg()
     url = (cfg.get("agentUrl") or "").rstrip("/")
@@ -242,7 +267,7 @@ class EventHub:
                 interval = 30
                 continue
             try:
-                st = agent_call("GET", "/status")
+                st = monitor_status()
                 interval = max(5, min(120, int(st.get("interval") or 30)))
                 self.broadcast({"type": "monitor", "status": st}, only="monitor")
             except urllib.error.HTTPError as exc:
@@ -255,6 +280,7 @@ class EventHub:
 
 hub = EventHub()
 collector.listeners.append(hub.broadcast)
+guac.audit_hook = audit.record
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -342,11 +368,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._error(HTTPStatus.UNPROCESSABLE_ENTITY, f"{LIBRARY_FILE.name} is damaged: {exc}")
         if path == "/api/monitor/config":
             c = monitor_cfg()
-            return self._json({"agentUrl": c.get("agentUrl", ""), "hasToken": bool(c.get("token")),
+            return self._json({"backend": c.get("backend") or "agent", "backends": monitoring.LABELS,
+                               "agentUrl": c.get("agentUrl", ""), "hasToken": bool(c.get("token")),
+                               "url": c.get("url", ""), "user": c.get("user", ""), "hasSecret": bool(c.get("secret")),
                                "cafile": c.get("cafile", ""), "insecure": bool(c.get("insecure"))})
         if path == "/api/monitor/status":
             try:
-                return self._json(agent_call("GET", "/status"))
+                return self._json(monitor_status())
             except urllib.error.HTTPError as exc:
                 return self._error(HTTPStatus.BAD_GATEWAY, f"agent said {exc.code} {exc.reason}")
             except Exception as exc:  # noqa: BLE001
@@ -370,9 +398,107 @@ class Handler(SimpleHTTPRequestHandler):
                 doc = observed.read(safe_name(parts[0]), parts[1])
                 return self._json(doc) if doc else self._error(HTTPStatus.NOT_FOUND, "nothing collected yet")
             return self._error(HTTPStatus.NOT_FOUND, "unknown endpoint")
+        if path == "/api/remote/ws":
+            return self._remote_ws()
         if path.startswith("/api/"):
+            if self._ops_api("GET", path, None):
+                return None
             return self._error(HTTPStatus.NOT_FOUND, "unknown endpoint")
         return super().do_GET()
+
+    # ---- changes, audit, backups, discovery, remote access -----------
+    def _ops_api(self, method, path, data):
+        """The operations API. Returns True when it answered the request."""
+        parts = [unquote(x) for x in path[len("/api/"):].split("/")]
+        head, n = parts[0], len(parts)
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            if head == "changes" and n >= 2:
+                lab = safe_name(parts[1])
+                if method == "GET" and n == 2:
+                    return self._json({"changes": changes.list_for(lab)}) or True
+                if method == "GET" and n == 3:
+                    return self._json(changes.public(changes.get(lab, parts[2]))) or True
+                if method == "POST" and n == 2:
+                    return self._json(changes.create(lab, data)) or True
+                if method == "POST" and n == 4:
+                    act = parts[3]
+                    if act == "items":
+                        return self._json(changes.add(lab, parts[2], data)) or True
+                    if act == "edit":
+                        return self._json(changes.edit(lab, parts[2], data)) or True
+                    if act == "discard":
+                        return self._json(changes.discard(lab, parts[2])) or True
+                    if act == "apply":
+                        return self._json(collector.change_apply(lab, parts[2], data)) or True
+            if head == "audit" and n == 2 and method == "GET":
+                lab = safe_name(parts[1])
+                entries = audit.read(lab, (q.get("device") or [None])[0], (q.get("limit") or [500])[0], (q.get("before") or [None])[0])
+                return self._json({"entries": entries, "verify": audit.verify(lab)}) or True
+            if head == "backups" and n >= 3:
+                lab, dev = safe_name(parts[1]), observed.safe(parts[2])
+                if method == "GET" and n == 3:
+                    return self._json({"backups": backups.list_for(lab, dev)}) or True
+                if method == "GET" and n == 4:
+                    doc = backups.read(lab, dev, parts[3])
+                    if not doc:
+                        return self._error(HTTPStatus.NOT_FOUND, "no such backup") or True
+                    doc.pop("archive", None)
+                    return self._json(doc) or True
+                if method == "POST" and n == 5 and parts[4] == "restore":
+                    body = dict(data or {}, backup=parts[3])
+                    body["device"] = dict(body.get("device") or {}, id=dev)
+                    return self._json(collector.restore(lab, body)) or True
+            if head == "discover" and n >= 2:
+                lab = safe_name(parts[1])
+                if method == "GET" and n == 2:
+                    return self._json({"result": discover.read(lab), "running": discover.running(lab)}) or True
+                if method == "POST" and n == 2:
+                    job = discover.start(lab, data, collector.new_job, collector.changed)
+                    return self._json(collector.snapshot(job["id"])) or True
+                if method == "POST" and n == 3 and parts[2] == "adopt":
+                    return self._json(discover.adopt(lab, data)) or True
+            if head == "remote" and n == 2:
+                if method == "GET" and parts[1] == "caps":
+                    return self._json(guac.caps()) or True
+                if method == "GET" and parts[1] == "config":
+                    return self._json(guac.config()) or True
+                if method == "PUT" and parts[1] == "config":
+                    return self._json(guac.save_config(data)) or True
+                if method == "POST" and parts[1] == "test":
+                    return self._json(guac.test()) or True
+                if method == "POST" and parts[1] == "session":
+                    return self._json(guac.new_session(data)) or True
+        except PermissionError as exc:
+            return self._error(HTTPStatus.FORBIDDEN, str(exc)) or True
+        except ValueError as exc:
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc)) or True
+        return False
+
+    def _remote_ws(self):
+        """WebSocket for one Guacamole session (guac.py): one-time id, same Origin, subprotocol "guacamole"."""
+        host = self.headers.get("Host") or ""
+        if self.headers.get("Origin") != f"http://{host}":
+            return self._error(HTTPStatus.FORBIDDEN, "bad origin")
+        if (self.headers.get("Upgrade") or "").lower() != "websocket" or not self.headers.get("Sec-WebSocket-Key"):
+            return self._error(HTTPStatus.BAD_REQUEST, "WebSocket upgrade expected")
+        q = urlparse(self.path).query
+        sid = parse_qs(q).get("sid", [""])[0]
+        params = guac.take_session(sid)
+        if params is None:
+            return self._error(HTTPStatus.FORBIDDEN, "unknown or expired session id")
+        self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", ssh_bridge.ws_accept(self.headers["Sec-WebSocket-Key"].strip()))
+        if "guacamole" in [x.strip() for x in (self.headers.get("Sec-WebSocket-Protocol") or "").split(",")]:
+            self.send_header("Sec-WebSocket-Protocol", "guacamole")
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        self.connection.settimeout(None)
+        guac.run(ssh_bridge.WebSocket(self.rfile, self.wfile, self.connection), params)
+        return None
 
     def _upgrade(self):
         """Answer a same-origin WebSocket upgrade. Returns the WebSocket, or None after an error reply."""
@@ -477,12 +603,19 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(data, dict):
                 return self._error(HTTPStatus.BAD_REQUEST, "bad config")
             c = monitor_cfg()
+            backend = str(data.get("backend", c.get("backend") or "agent"))
+            if backend not in monitoring.BACKENDS:
+                return self._error(HTTPStatus.BAD_REQUEST, "unknown monitoring backend")
             url = str(data.get("agentUrl", c.get("agentUrl", ""))).strip()
-            if url and not url.startswith(("http://", "https://")):
-                return self._error(HTTPStatus.BAD_REQUEST, "agent URL must start with http:// or https://")
-            c["agentUrl"] = url
+            burl = str(data.get("url", c.get("url", ""))).strip()
+            for u in (url, burl):
+                if u and not u.startswith(("http://", "https://")):
+                    return self._error(HTTPStatus.BAD_REQUEST, "the URL must start with http:// or https://")
+            c.update(backend=backend, agentUrl=url, url=burl, user=str(data.get("user", c.get("user", ""))).strip()[:120])
             if "token" in data and data["token"] is not None:
                 c["token"] = str(data["token"]).strip()
+            if "secret" in data and data["secret"] is not None:
+                c["secret"] = str(data["secret"]).strip()
             c["cafile"] = str(data.get("cafile", c.get("cafile", ""))).strip()
             c["insecure"] = bool(data.get("insecure", c.get("insecure", False)))
             with _lock:
@@ -492,6 +625,8 @@ class Handler(SimpleHTTPRequestHandler):
                 except OSError:
                     pass
             return self._json({"ok": True})
+        if self._ops_api("PUT", path, data):
+            return None
         if path == "/api/library":
             if not isinstance(data, dict) or "templates" not in data:
                 return self._error(HTTPStatus.BAD_REQUEST, "not a library document")
@@ -513,6 +648,8 @@ class Handler(SimpleHTTPRequestHandler):
             data = self._body()
         except Exception as exc:  # noqa: BLE001
             return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        if self._ops_api("POST", path, data):
+            return None
         if path.startswith("/api/export/"):
             # body: {"files": [{"device": "...", "name": "...", "content": "..."}]}
             lab = safe_name(unquote(path[len("/api/export/"):]))
@@ -535,7 +672,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"ok": True, "folder": str(base), "files": written})
         if path == "/api/monitor/targets":
             try:
-                return self._json(agent_call("PUT", "/targets", (data or {}).get("targets", [])))
+                return self._json(monitor_targets((data or {}).get("targets", [])))
             except urllib.error.HTTPError as exc:
                 return self._error(HTTPStatus.BAD_GATEWAY, f"agent said {exc.code} {exc.reason}")
             except Exception as exc:  # noqa: BLE001
@@ -599,7 +736,7 @@ def main():
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.allowed_host = args.host.lower()
-    ssh_bridge.ENABLED = _is_loopback(args.host)
+    ssh_bridge.ENABLED = guac.ENABLED = _is_loopback(args.host)
     if not ssh_bridge.ENABLED:
         print("SSH console is off: the server listens on a network address.")
     url = f"http://127.0.0.1:{args.port}/"

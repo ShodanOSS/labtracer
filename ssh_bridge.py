@@ -309,6 +309,9 @@ class WebSocket:
     def send_json(self, obj):
         self._send(0x1, json.dumps(obj).encode("utf-8"))
 
+    def send_text(self, text):
+        self._send(0x1, text.encode("utf-8"))
+
     def close(self, code=1000):
         if self.closed:
             return

@@ -62,7 +62,7 @@ class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="labtracer-test-"))
-        for f in ("server.py", "ssh_bridge.py"):
+        for f in ("server.py", "ssh_bridge.py", "guac.py", "monitoring.py"):
             shutil.copy2(ROOT / f, cls.tmp / f)
         shutil.copytree(ROOT / "collector", cls.tmp / "collector", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copytree(ROOT / "app", cls.tmp / "app")

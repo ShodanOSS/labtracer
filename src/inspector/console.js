@@ -2,6 +2,7 @@
 import { h, ap } from '../util.js';
 import { monitorHost } from '../monitor.js';
 import { SSH_DEFAULTS, sshConf } from '../sshterm.js';
+import { PROTOCOLS, REMOTE_DEFAULTS, remoteConf, remoteHost, defaultPort } from '../remote.js';
 
 export class ConsoleTab {
   tab_console(d, el) {
@@ -10,8 +11,10 @@ export class ConsoleTab {
     const setMode = m => { this.conMode.set(d.id, m); this.render(); };
     ap(el, h('div', { class: 'seg con-mode' },
       h('button', { class: 'tb' + (mode === 'sim' ? ' on' : ''), title: 'IOS-style commands that edit the model', onclick: () => setMode('sim') }, 'Simulated'),
-      h('button', { class: 'tb' + (mode === 'ssh' ? ' on' : ''), title: 'A real SSH session to the device', onclick: () => setMode('ssh') }, 'SSH' + (app.ssh.isOpen(d.id) ? ' ●' : ''))));
+      h('button', { class: 'tb' + (mode === 'ssh' ? ' on' : ''), title: 'A real SSH session to the device', onclick: () => setMode('ssh') }, 'SSH' + (app.ssh.isOpen(d.id) ? ' ●' : '')),
+      h('button', { class: 'tb' + (mode === 'remote' ? ' on' : ''), title: 'Remote desktop or terminal over Apache Guacamole (RDP, VNC, SSH, Telnet)', onclick: () => setMode('remote') }, 'Remote' + (app.remote.isOpen(d.id) ? ' ●' : ''))));
     if (mode === 'ssh') return this.sshConsole(d, el);
+    if (mode === 'remote') return this.remoteForm(d, el);
     if (!this.term.has(d.id)) this.term.set(d.id, [{ c: 'muted', s: `${d.name} console. Type ? for help. Changes apply to the model at once.` }]);
     const buf = this.term.get(d.id);
     const hist = this.hist.get(d.id) || []; this.hist.set(d.id, hist);
@@ -39,6 +42,33 @@ export class ConsoleTab {
       outEl, h('div', { class: 'term-line' }, h('span', { class: 'prompt' }, app.cli.prompt(d)), input));
     ap(el, termBox);
     setTimeout(() => { if (!document.activeElement || document.activeElement === document.body) input.focus(); }, 0);
+  }
+
+  remoteForm(d, el) {
+    const app = this.app, rm = app.remote;
+    if (!rm.available) { ap(el, h('p', { class: 'muted small' }, 'Remote access needs server.py.')); return; }
+    if (!d.remote) d.remote = { ...REMOTE_DEFAULTS }; // saved with the next change; holds no secrets
+    Object.assign(d.remote, { ...REMOTE_DEFAULTS, ...d.remote });
+    const c = remoteConf(d), S = { dev: d.id };
+    const open = rm.isOpen(d.id);
+    ap(el,
+      h('div', { class: 'row2' },
+        this.inp(d.remote, 'protocol', 'Protocol', S, { k: 'rem-proto', type: 'select', options: PROTOCOLS.map(([v, l]) => [v, l]) }),
+        this.inp(d.remote, 'port', 'Port', S, { k: 'rem-port', type: 'number', min: 0, max: 65535, step: 1, empty: 0, ph: String(defaultPort(c.protocol)), hint: `0 = ${defaultPort(c.protocol)}` })),
+      this.inp(d.remote, 'host', 'Host', S, { k: 'rem-host', mono: true, ph: remoteHost({ ...d, remote: { ...c, host: '' } }) || 'IP address or DNS name', hint: 'Empty = the SSH host, the monitor address or the first IP.' }),
+      h('div', { class: 'row2' },
+        this.inp(d.remote, 'user', 'User', S, { k: 'rem-user', mono: true }),
+        c.protocol === 'rdp' ? this.inp(d.remote, 'domain', 'Domain', S, { k: 'rem-domain', mono: true }) : h('span')),
+      c.protocol === 'rdp' ? h('div', { class: 'row2' },
+        this.inp(d.remote, 'security', 'Security', S, { k: 'rem-sec', type: 'select', options: [['any', 'Negotiate'], ['nla', 'NLA'], ['tls', 'TLS'], ['rdp', 'RDP (legacy)'], ['vmconnect', 'Hyper-V console']] }),
+        this.inp(d.remote, 'layout', 'Keyboard', S, { k: 'rem-layout', type: 'select', options: [['en-us-qwerty', 'English (US)'], ['en-gb-qwerty', 'English (UK)'], ['de-de-qwertz', 'German'], ['fr-fr-azerty', 'French'], ['es-es-qwerty', 'Spanish'], ['it-it-qwerty', 'Italian'], ['sv-se-qwerty', 'Swedish'], ['ja-jp-qwerty', 'Japanese'], ['failsafe', 'Failsafe (Unicode)']] })) : null,
+      c.protocol === 'rdp' ? this.inp(d.remote, 'ignoreCert', 'Accept the server certificate without checking it (self-signed)', S, { type: 'check', k: 'rem-cert' }) : null,
+      c.protocol === 'rdp' ? this.inp(d.remote, 'console', 'Connect to the console session (admin)', S, { type: 'check', k: 'rem-console' }) : null,
+      this.inp(d.remote, 'readOnly', 'View only (no keyboard or mouse input)', S, { type: 'check', k: 'rem-ro' }),
+      h('div', { class: 'btnrow' },
+        h('button', { class: 'btn small primary', onclick: () => rm.open(d) }, open ? 'Show window' : 'Connect'),
+        open ? h('button', { class: 'btn small', onclick: () => rm.disconnect(d.id) }, 'Disconnect') : null),
+      h('p', { class: 'muted small' }, 'Needs guacd (Apache Guacamole server daemon). Set its address in the lab panel (click empty space) › Remote access. The password is asked at each connect and never saved.'));
   }
 
   sshConsole(d, el) {

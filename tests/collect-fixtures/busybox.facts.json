@@ -113,5 +113,8 @@
   }
  ],
  "guests": null,
+ "arp": null,
+ "macTable": null,
+ "platform": {},
  "rawConfig": ""
 }

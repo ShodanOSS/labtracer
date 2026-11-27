@@ -29,7 +29,7 @@ def _policy(trust_fp):
     class TrustOnce(pm.MissingHostKeyPolicy):
         def missing_host_key(self, client, hostname, key):
             fp = ssh_bridge.fingerprint(key)
-            if trust_fp and trust_fp == fp:
+            if trust_fp is True or (trust_fp and trust_fp == fp):  # True: trust on first use (discovery, opt-in)
                 ssh_bridge.remember_host_key(client, hostname, key)
                 return
             raise HostKeyUnknown(hostname, key.get_name(), fp)
@@ -50,11 +50,15 @@ class Session:
             raise ValueError("paramiko is not installed. Run: pip install paramiko")
         return cls(ssh_bridge.open_client(p, password, _policy(trust)), p["host"])
 
-    def run(self, cmd, timeout=CMD_TIMEOUT):
-        """Run one command (exec channel, no pty). Returns (exit status, stdout, stderr) as text."""
+    def run(self, cmd, timeout=CMD_TIMEOUT, stdin=None):
+        """Run one command (exec channel, no pty). Returns (exit status, stdout, stderr) as text.
+        stdin: text or bytes sent to the command, then end of file (for example a file for "tee")."""
         chan = self.client.get_transport().open_session(timeout=10)
         chan.settimeout(timeout)
         chan.exec_command(cmd)
+        if stdin is not None:
+            chan.sendall(stdin.encode("utf-8") if isinstance(stdin, str) else stdin)
+            chan.shutdown_write()
         out, err = bytearray(), bytearray()
         end = time.time() + timeout
         while True:
@@ -113,9 +117,13 @@ class Shell:
             raise ConnectionError("the device closed the session")
         return ANSI_RE.sub("", data.decode("utf-8", "replace"))
 
-    def _wait_prompt(self, initial=False, timeout=CMD_TIMEOUT):
+    def _wait_prompt(self, initial=False, timeout=CMD_TIMEOUT, answers=None):
+        """answers: [(regex, reply)] for questions a command asks ("Destination filename [x]?",
+        "[confirm]"). Each is answered once; only text after the last answer is searched."""
         end = time.time() + timeout
         text = ""
+        seen = 0
+        answers = list(answers or [])
         quiet_since = time.time()
         if initial:
             self.chan.send("\n")
@@ -129,6 +137,11 @@ class Shell:
                 if MORE_RE.search(text):  # pager is on: ask for the next page
                     text = MORE_RE.sub("", text)
                     self.chan.send(" ")
+                    continue
+                hit = next(((i, m) for i, (rx, _r) in enumerate(answers) for m in [re.search(rx, text[seen:])] if m), None)
+                if hit:
+                    self.chan.send(answers.pop(hit[0])[1])
+                    seen += hit[1].end()
                     continue
             tail = text.rstrip(" ").rsplit("\n", 1)[-1]
             if initial:
@@ -153,9 +166,9 @@ class Shell:
     def privileged(self):
         return self.prompt.endswith("#")
 
-    def cmd(self, command, timeout=CMD_TIMEOUT):
+    def cmd(self, command, timeout=CMD_TIMEOUT, answers=None):
         self.chan.send(command + "\n")
-        text = self._wait_prompt(timeout=timeout)
+        text = self._wait_prompt(timeout=timeout, answers=answers)
         lines = text.split("\n")
         if lines and command.strip() and command.strip() in lines[0]:
             lines = lines[1:]  # echo

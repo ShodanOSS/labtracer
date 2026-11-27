@@ -62,7 +62,7 @@ async function startBrowser(profile) {
 
 test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
   const tmp = mkdtempSync(join(tmpdir(), 'labtracer-ui-'));
-  for (const f of ['server.py', 'ssh_bridge.py', 'collector']) cpSync(join(ROOT, f), join(tmp, f), { recursive: true });
+  for (const f of ['server.py', 'ssh_bridge.py', 'guac.py', 'monitoring.py', 'collector']) cpSync(join(ROOT, f), join(tmp, f), { recursive: true });
   cpSync(join(ROOT, 'app'), join(tmp, 'app'), { recursive: true });
   const csvFile = join(tmp, 'messy.csv'); writeFileSync(csvFile, CSV);
   const port = await freePort();
@@ -210,7 +210,10 @@ test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
       a.collect.facts.set(d.id, f); a.onDriftChanged();
       a.inspector.tab = 'drift'; a.select({ type: 'device', id: d.id });
     }, facts);
-    assert.ok(await page.evaluate(() => [...document.querySelectorAll('.lbl')].some(e => /^Δ\d+$/.test(e.getAttribute('data-drift') || ''))), 'drift badge on the label');
+    // labels are made on the next animation frame, which a background tab does not get
+    await page.bringToFront();
+    await page.waitForFunction(() => [...document.querySelectorAll('.lbl')].some(e => /^Δ\d+$/.test(e.getAttribute('data-drift') || '')), { timeout: 5000 })
+      .catch(() => assert.fail('drift badge on the label'));
     const row = await page.evaluateHandle(() => [...document.querySelectorAll('#inspector .drow')].find(r => /Gi0\/3 is in VLAN 30/.test(r.textContent)));
     assert.ok(await row.evaluate(r => !!r), 'the VLAN difference is listed');
     assert.equal(await vlan(), 1);
@@ -222,16 +225,48 @@ test('LabTracer in a browser',{ skip, timeout: 120000 }, async t => {
     // push: server.py renders the commands from operations; the user reviews them
     await page.evaluate(() => { const a = window.labtracer, d = a.lab.devices.find(x => x.name === 'rack-switch'); d.collect = { enabled: true, driver: 'ios', ignore: [] }; a.inspector.render(); });
     const push = await page.evaluateHandle(() => [...document.querySelectorAll('#inspector .drow')].find(r => /Gi0\/3 is in VLAN 30/.test(r.textContent)).querySelector('.push'));
-    await push.evaluate(b => b.click()); await sleep(600);
+    await push.evaluate(b => b.click());
+    await page.waitForSelector('.modal', { timeout: 15000 }); // the first plan loads paramiko in server.py: that can take seconds
     const review = await page.$eval('.modal', e => e.textContent);
     assert.match(review, /Push to rack-switch/);
     assert.match(review, /interface GigabitEthernet0\/3\s+switchport mode access\s+switchport access vlan 1/, 'the rendered IOS commands');
     assert.ok(await page.$$eval('.modal .btn', b => b.some(x => x.textContent === 'Send to console')));
     await page.keyboard.press('Escape'); await sleep(100);
     assert.equal(await vlan(), 1, 'reviewing changes nothing');
+    // stage: the change goes into a change set on the server, reviewed with the others before it runs
+    await page.evaluate(() => [...document.querySelectorAll('#inspector .drow')].find(r => /Gi0\/3 is in VLAN 30/.test(r.textContent))
+      .querySelectorAll('.mini.txt').forEach(b => { if (b.textContent === 'stage') b.click(); }));
+    await page.waitForFunction(() => window.labtracer.changes.current?.items.length === 1 && /1 staged/.test(document.getElementById('inspector').textContent), { timeout: 15000 })
+      .catch(() => assert.fail('the Drift tab shows the staged change'));
+    await page.evaluate(() => window.labtracer.changes.review());
+    const staged = await page.$eval('.modal', e => e.textContent);
+    assert.match(staged, /Review staged changes/);
+    assert.match(staged, /switchport access vlan 1/);
+    assert.match(staged, /rollback timer/);
+    await page.evaluate(() => [...document.querySelectorAll('.modal .btn')].find(b => b.textContent === 'Discard').click());
+    await page.waitForSelector('.modal .btn.danger'); // the confirmation
+    await page.evaluate(() => [...document.querySelectorAll('.modal .btn.danger')].pop().click());
+    await page.waitForFunction(() => !window.labtracer.changes.current && !document.querySelector('.modal'), { timeout: 5000 });
+    await page.evaluate(() => window.labtracer.changes.audit());
+    await page.waitForSelector('.modal .audit');
+    const log = await page.$eval('.modal', e => e.textContent);
+    assert.match(log, /chain intact/);
+    assert.match(log, /change set discarded/);
+    await page.keyboard.press('Escape'); await sleep(100);
+    // remote access form (Guacamole); the client script is served, but loaded only for a session
+    await page.evaluate(() => {
+      const a = window.labtracer, d = a.lab.devices.find(x => x.name === 'rack-switch');
+      a.inspector.tab = 'console'; a.inspector.conMode.set(d.id, 'remote'); a.select({ type: 'device', id: d.id });
+    });
+    assert.match(await page.$eval('#inspector', e => e.textContent), /Needs guacd/);
+    assert.ok(await page.evaluate(() => !window.Guacamole), 'guac.js is not loaded until a session opens');
+    assert.ok(await page.evaluate(async () => (await fetch('/guac.js')).ok), 'guac.js is served');
+    await page.evaluate(() => { const a = window.labtracer; a.inspector.conMode.set(a.selection.id, 'sim'); a.inspector.tab = 'drift'; a.inspector.render(); });
     assert.ok(await page.evaluate(() => window.labtracer.events.connected), 'the live events WebSocket is open');
     await page.evaluate(() => { const a = window.labtracer; a.select(null); });
-    assert.match(await page.$eval('#inspector', e => e.textContent), /Drift: model vs devices/);
+    const panel = await page.$eval('#inspector', e => e.textContent);
+    for (const s of [/Drift: model vs devices/, /Discover network/, /Changes and audit/, /Remote access \(Guacamole\)/, /Status from/])
+      assert.match(panel, s);
     await page.evaluate(() => { const a = window.labtracer; a.collect.facts.clear(); a.onDriftChanged(); });
   });
 

@@ -9,9 +9,10 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+// app.js: the app. guac.js: the Guacamole client, loaded only for a remote session (src/remote.js).
 export const OPTIONS = {
-  entryPoints: [join(ROOT, 'src/main.js')],
-  outfile: join(ROOT, 'app/app.js'),
+  entryPoints: { app: join(ROOT, 'src/main.js'), guac: join(ROOT, 'src/guac-entry.js') },
+  outdir: join(ROOT, 'app'),
   bundle: true, format: 'iife', minify: true, target: ['chrome90', 'firefox90'],
   logLevel: 'warning',
 };

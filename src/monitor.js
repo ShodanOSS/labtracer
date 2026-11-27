@@ -86,7 +86,7 @@ export class Monitor {
     const r = await fetch('/api/monitor/targets', { method: 'POST', headers: HDR, body: JSON.stringify({ targets }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || r.statusText);
-    if (!quiet) toast(`Agent now checks ${j.targets} device(s)`, 'ok');
+    if (!quiet) toast(`Monitoring: ${j.targets} device(s) to watch`, 'ok');
     return j;
   }
   schedulePush() {
@@ -111,7 +111,8 @@ export class Monitor {
 
   async start() {
     if (!this.available) { toast('Live status needs server.py (it is not available when index.html is opened directly)', 'warn', 4500); return false; }
-    if (!this.config.agentUrl) { toast('Set the agent address first: click empty space, then the Monitoring section', 'warn', 4500); this.app.select(null); return false; }
+    const agent = (this.config.backend || 'agent') === 'agent';
+    if (!(agent ? this.config.agentUrl : this.config.url)) { toast(`Set the ${agent ? 'agent address' : 'monitoring URL'} first: click empty space, then the Monitoring section`, 'warn', 4500); this.app.select(null); return false; }
     try { await this.push(true); } catch (e) { this.fail(e); this.app.onMonitorStatus(); return false; }
     this.live = true;
     await this.poll();

@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import collector  # noqa: E402
 import ssh_bridge  # noqa: E402
-from collector import ops, store  # noqa: E402
+from collector import audit, backups, changes, ops, store  # noqa: E402
 from collector.conn import Shell  # noqa: E402
-from collector.drivers import ios, linux  # noqa: E402
+from collector.drivers import ios, linux, routeros  # noqa: E402
 
 
 class ValidateTest(unittest.TestCase):
@@ -73,16 +73,17 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(notes, [])
 
     def test_linux_quotes_and_notes(self):
-        cmds, notes = linux.render(ops.validate([
+        """Without platform facts (an old collect): console commands only, never applied."""
+        cmds, notes, extra = linux.render(ops.validate([
             {"op": "iface-desc", "port": "eno1", "desc": "uplink $(reboot)"},
             {"op": "iface-ip", "port": "eno1", "ip": "10.0.0.5/24", "old": ["10.0.0.9/24"]},
             {"op": "sw-access", "port": "eno1", "vlan": 20},
         ]))
         self.assertEqual(cmds, ["sudo ip link set dev eno1 alias 'uplink $(reboot)'",
                                 "sudo ip addr del 10.0.0.9/24 dev eno1", "sudo ip addr add 10.0.0.5/24 dev eno1"])
-        self.assertTrue(any("persistent" in n for n in notes))
+        self.assertTrue(any("Collect the device again" in n for n in notes))
         self.assertTrue(any("sw-access" in n for n in notes))
-        self.assertFalse(hasattr(linux, "apply"), "Linux changes go to the console, never applied automatically")
+        self.assertFalse(extra["canApply"], "no apply until LabTracer knows how the host keeps its config")
 
 
 class FakeIos:
@@ -155,16 +156,27 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(sent[-1], "end", "it leaves config mode")
 
 
+def isolate(tmp):
+    """Point every data folder of the collector into tmp (tests never touch ./data)."""
+    ps = [mock.patch.object(store, "OBS_DIR", tmp / "observed"), mock.patch.object(audit, "AUDIT_DIR", tmp / "audit"),
+          mock.patch.object(backups, "BACKUP_DIR", tmp / "backups"), mock.patch.object(changes, "CHANGE_DIR", tmp / "changes")]
+    for p in ps:
+        p.start()
+    audit.reset_cache()
+    return ps
+
+
 class PlanTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.patch = mock.patch.object(store, "OBS_DIR", Path(self.tmp.name))
-        self.patch.start()
+        self.patches = isolate(Path(self.tmp.name))
         self.dev = {"id": "dev_1", "name": "sw1", "host": "192.0.2.10", "user": "admin", "auth": "key"}
         self.ops = [{"op": "sw-access", "port": "Gi0/3", "vlan": 20}]
 
     def tearDown(self):
-        self.patch.stop()
+        for p in self.patches:
+            p.stop()
+        audit.reset_cache()
         self.tmp.cleanup()
 
     def test_needs_a_collect_to_know_the_platform(self):
@@ -182,7 +194,7 @@ class PlanTest(unittest.TestCase):
     def test_plan_is_used_once(self):
         r = collector.plan("lab", {"device": {**self.dev, "driver": "ios"}, "ops": self.ops})
         self.assertIn(" switchport access vlan 20", r["commands"])
-        with mock.patch.object(collector, "_apply_one"):
+        with mock.patch.object(collector._pool, "submit"):  # nothing runs: only the plan bookkeeping is tested
             snap = collector.apply({"planId": r["planId"]})
         self.assertEqual(snap["kind"], "apply")
         with self.assertRaisesRegex(ValueError, "expired or was used"):
@@ -192,11 +204,13 @@ class PlanTest(unittest.TestCase):
         r = collector.plan("lab", {"device": {**self.dev, "driver": "ios"}, "ops": self.ops})
         ran = {}
 
-        def fake_apply(sess, cmds, save):
+        def fake_apply(sess, cmds, save, armed, extra, facts):
             ran["cmds"], ran["save"] = cmds, save
             return True, "transcript"
         facts = {"collected": 5, "driver": "ios", "errors": [], "rawConfig": ""}
         with mock.patch.object(ios, "apply", side_effect=fake_apply), \
+                mock.patch.object(ios, "backup", return_value={"config": "hostname sw1\n", "files": {}, "archive": "", "onDevice": ""}), \
+                mock.patch.object(ios, "persist", return_value=(True, "write memory\n[OK]")) as persist, \
                 mock.patch.object(ios, "collect", return_value=dict(facts)), \
                 mock.patch.object(collector.Session, "open", side_effect=lambda *a, **k: mock.Mock(host="192.0.2.10")):
             snap = collector.apply({"planId": r["planId"], "save": True})
@@ -208,7 +222,9 @@ class PlanTest(unittest.TestCase):
         item = snap["devices"]["dev_1"]
         self.assertEqual(item["state"], "done", item)
         self.assertEqual(ran["cmds"], r["commands"])
-        self.assertTrue(ran["save"])
+        self.assertFalse(ran["save"], "apply does not save; the save step does, after the change is confirmed")
+        persist.assert_called_once()
+        self.assertTrue(item["backup"], "a backup is taken before the change")
         self.assertEqual(store.read("lab", "dev_1")["facts"]["collected"], 5, "the device is read again after the change")
 
     def test_plan_without_paramiko_can_still_be_sent_to_the_console(self):

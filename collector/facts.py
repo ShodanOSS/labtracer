@@ -6,9 +6,12 @@
                master}]  master: the bridge or bond the interface belongs to (Linux)
   routes:    [{dest, via, dev}]                    static routes only
   vlans:     [{id, name}] | None                   None = the driver does not read VLANs
-  neighbors: [{localPort, remoteName, remotePort, remoteMac}] | None
+  neighbors: [{localPort, remoteName, remotePort, remoteMac, remoteIp}] | None   remoteIp: management address
   listening: [{port, proto}] | None
   guests:    [{name, vmid, kind, state}] | None
+  arp:       [{ip, mac, dev}] | None                IP -> MAC table (ARP / neighbor cache)
+  macTable:  [{mac, vlan, port}] | None             learned MACs per switch port (dynamic entries only)
+  platform:  {}                                     driver specific (Linux: network config system, files)
   rawConfig: "" }
 Fields that a driver can not read stay None or "" (drift.js skips them).
 """
@@ -24,7 +27,7 @@ def new_facts(driver):
         "factsVersion": FACTS_VERSION, "collected": int(time.time()), "driver": driver, "ok": True, "errors": [],
         "system": {"hostname": "", "vendor": "", "model": "", "serial": "", "os": "", "osVersion": ""},
         "interfaces": [], "routes": [], "vlans": None, "neighbors": None, "listening": None, "guests": None,
-        "rawConfig": "",
+        "arp": None, "macTable": None, "platform": {}, "rawConfig": "",
     }
 
 
@@ -74,3 +77,15 @@ def sections(text, marker="@@"):
     if cur is not None:
         out[cur] = "\n".join(buf).strip("\n")
     return out
+
+
+def neighbor(local, name="", port="", mac="", ip=""):
+    return {"localPort": local, "remoteName": name, "remotePort": port, "remoteMac": norm_mac(mac), "remoteIp": ip_only(ip)}
+
+
+def ip_only(v):
+    """'10.0.0.1', '10.0.0.1/24' -> '10.0.0.1'; '' when not IPv4."""
+    try:
+        return str(ipaddress.IPv4Address(str(v or "").split("/")[0].strip()))
+    except ValueError:
+        return ""

@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 import collector  # noqa: E402
 import ssh_bridge  # noqa: E402
 from collector import drivers, store  # noqa: E402
-from collector.drivers import ios, linux  # noqa: E402
+from collector.drivers import ios, linux, routeros  # noqa: E402
 from collector.facts import cidr, norm_dest, norm_mac, sections  # noqa: E402
 
 CASES = {
@@ -112,8 +112,7 @@ class DetectTest(unittest.TestCase):
     def test_detect(self):
         self.assertIs(drivers.detect(FakeSession("Linux\n")), linux)
         self.assertIs(drivers.detect(FakeSession("\n% Invalid input detected at '^' marker.\n")), ios)
-        with self.assertRaisesRegex(ValueError, "RouterOS"):
-            drivers.detect(FakeSession("bad command name uname (line 1 column 1)"))
+        self.assertIs(drivers.detect(FakeSession("bad command name uname (line 1 column 1)")), routeros)
 
     def test_planned_drivers_are_refused(self):
         with self.assertRaisesRegex(ValueError, "not supported yet"):

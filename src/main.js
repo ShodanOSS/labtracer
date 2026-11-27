@@ -13,6 +13,9 @@ import { MEDIA } from './templates.js';
 import { Monitor } from './monitor.js';
 import { SshManager } from './sshterm.js';
 import { Collector } from './collect.js';
+import { ChangeManager } from './changes.js';
+import { Discovery } from './discover.js';
+import { RemoteManager } from './remote.js';
 import { Events } from './events.js';
 import { History } from './history.js';
 import { Panels } from './panels.js';
@@ -57,6 +60,9 @@ class App {
     this.monitor = new Monitor(this);
     this.ssh = new SshManager(this);
     this.collect = new Collector(this);
+    this.changes = new ChangeManager(this);
+    this.discover = new Discovery(this);
+    this.remote = new RemoteManager(this);
     const invEl = h('div', { class: 'inv', hidden: true });
     document.getElementById('viewport').appendChild(invEl);
     this.inventory = new InventoryView(invEl, this);
@@ -89,6 +95,7 @@ class App {
   loadLab(lab, name) {
     const m = migrateLab(lab);
     this.ssh?.prune(true); // sessions belong to the devices of the old lab
+    this.remote?.prune(true);
     this.lab = normalizeLab(lab);
     this.migratedFrom = m.from < m.to ? m.from : null; // the next save keeps a copy of the old file
     this.labName = safeName(name || lab.name || 'lab');
@@ -113,6 +120,8 @@ class App {
     store.setPref('lastLab', this.labName);
     if (this.monitor?.live) this.monitor.schedulePush();
     this.collect?.load(); // facts read from the devices of this lab (drift)
+    this.changes?.load(); // staged change set of this lab
+    this.discover?.load(); // last discovery result of this lab
     document.getElementById('lab-name').textContent = this.labName;
     document.title = `${this.labName} · LabTracer`;
     this.updateStatus();
@@ -212,6 +221,7 @@ class App {
     else if (scope && scope.dev) this.viewport.refreshDevice(scope.dev);
     if (this.selection && !this.selectionExists()) this.selection = null;
     this.ssh.prune(); // close sessions of deleted devices
+    this.remote.prune();
     if (this.inventoryOn) this.inventory.render();
     this.inspector.render();
     this.renderRoomSelect();
@@ -237,6 +247,7 @@ class App {
     if (!this.selectionExists()) this.selection = null;
     if (!this.lab.rooms.some(r => r.id === this.roomId)) this.roomId = this.lab.rooms[0]?.id || null;
     this.ssh.prune();
+    this.remote.prune();
     if (this.inventoryOn) { this.viewportStale = true; this.inventory.render(); } else this.viewport.rebuildAll();
     this.inspector.render(); this.renderRoomSelect(); this.updateStatus();
     this.refreshDrift();

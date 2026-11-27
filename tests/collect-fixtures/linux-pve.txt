@@ -22,7 +22,7 @@ LISTEN 0      4096               *:8006             *:*
 LISTEN 0      100            [::1]:25              [::]:*
 LISTEN 0      4096            [::]:111           [::]:*
 @@lldp
-{"lldp":{"interface":{"eno1":{"via":"LLDP","chassis":{"rack-switch":{"id":{"type":"mac","value":"00:1b:54:aa:bb:cc"},"descr":"Cisco IOS Software"}},"port":{"id":{"type":"ifname","value":"Gi0/2"},"descr":"GigabitEthernet0/2"}}}}}
+{"lldp":{"interface":{"eno1":{"via":"LLDP","chassis":{"rack-switch":{"id":{"type":"mac","value":"00:1b:54:aa:bb:cc"},"descr":"Cisco IOS Software","mgmt-ip":"192.168.10.2"}},"port":{"id":{"type":"ifname","value":"Gi0/2"},"descr":"GigabitEthernet0/2"}}}}}
 @@dmi
 sys_vendor=Supermicro
 product_name=SYS-5019C-M
@@ -32,4 +32,33 @@ product_serial=
 @@pve
 [{"id":"qemu/100","name":"dc01","node":"srv-01","status":"running","type":"qemu","vmid":100},{"id":"lxc/101","name":"pihole","node":"srv-01","status":"stopped","type":"lxc","vmid":101},{"id":"qemu/200","name":"other","node":"srv-02","status":"running","type":"qemu","vmid":200}]
 @@nvram
+@@neigh
+[{"dst":"192.168.20.1","dev":"vmbr0","lladdr":"00:14:bf:aa:bb:01","state":["REACHABLE"]},{"dst":"192.168.20.30","dev":"vmbr0","lladdr":"a4:bb:6d:11:22:99","state":["STALE"]},{"dst":"192.168.20.31","dev":"vmbr0","state":["FAILED"]}]
+@@fdb
+[{"mac":"ea:6b:1c:00:00:01","ifname":"tap100i0","master":"vmbr0","state":"permanent"},{"mac":"52:54:00:aa:00:01","ifname":"tap100i0","master":"vmbr0","state":""},{"mac":"00:14:bf:aa:bb:01","ifname":"eno1","master":"vmbr0","state":""},{"mac":"33:33:00:00:00:01","ifname":"eno1","flags":["self"],"state":"permanent"}]
+@@uid
+0
+@@netcfg
+ifupdown=1
+ifreload=1
+systemdrun=1
+hostnamectl=1
+@@nmdev
+@@ifupdown
+auto lo
+iface lo inet loopback
+
+iface eno1 inet manual
+
+iface eno2 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+	address 192.168.20.11/24
+	gateway 192.168.20.1
+	bridge-ports eno1
+	bridge-stp off
+	bridge-fd 0
+
+source /etc/network/interfaces.d/*
 @@end

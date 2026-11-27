@@ -12,6 +12,7 @@ import { devById, isDeployed } from './model.js';
 import { modal, toast } from './dialogs.js';
 import { sshConf, sshHost, askPassword } from './sshterm.js';
 import { compareDevice, collectConf, labCollectConf, inventoryFacts, driftCounts } from './drift.js';
+import { fileDiff } from './changes.js';
 
 const HDR = { 'Content-Type': 'application/json', 'X-LabTracer': '1' };
 const POLL_MS = 1000;        // job polling without the events WebSocket
@@ -202,14 +203,21 @@ export class Collector {
     try { plan = await postJson(`/api/remediate/${encodeURIComponent(this.labName)}/plan`, { device: this.params(d), ops: items.flatMap(it => it.push.ops) }); }
     catch (e) { toast('Push: ' + e.message, 'err', 7000); return; }
     const text = plan.commands.join('\n');
+    const consoleText = plan.commands.filter(c => !c.startsWith('@')).join('\n');
     const danger = items.filter(it => it.push.danger);
-    const save = h('input', { type: 'checkbox' });
+    const sf = plan.safety || {};
+    const save = h('input', { type: 'checkbox', checked: sf.save ? true : null });
+    const rb = h('input', { class: 'inp', type: 'number', min: 0, max: 60, step: 1, value: sf.rollback && danger.length ? 5 : 0, style: { width: '5em' } });
+    const restore = h('input', { type: 'checkbox', checked: true });
     const buttons = [
       { label: 'Cancel' },
       { label: 'Copy', onClick: async () => { try { await navigator.clipboard.writeText(text); toast('Copied', 'ok', 1200); } catch { toast('The browser did not allow the copy', 'warn'); } return true; } },
-      { label: 'Send to console', primary: !plan.canApply, onClick: () => this.sendToConsole(d, text) },
+      { label: 'Stage', onClick: () => this.app.changes.stage(d, items) },
+      { label: 'Send to console', primary: !plan.canApply, onClick: () => this.sendToConsole(d, consoleText) },
     ];
-    if (plan.canApply) buttons.push({ label: 'Apply', primary: true, danger: danger.length > 0, onClick: () => { this.applyPlan(d, plan, save.checked); } });
+    if (plan.canApply) buttons.push({ label: 'Apply', primary: true, danger: danger.length > 0, onClick: () => {
+      this.applyPlan(d, plan, { save: save.checked, rollback: Math.max(0, Math.min(60, Math.round(+rb.value || 0))), onError: restore.checked ? 'restore' : 'stop' });
+    } });
     modal(`Push to ${d.name}`, h('div', null,
       h('p', { class: 'small' }, `Makes the device match the model for ${items.length} item(s):`),
       h('ul', { class: 'small push-items' }, items.map(it => h('li', { class: it.push.danger ? 'warn' : '' }, it.push.label, h('span', { class: 'muted' }, ` (${it.text})`)))),
@@ -217,10 +225,15 @@ export class Collector {
       plan.notes.map(n => h('div', { class: 'muted small' }, n)),
       h('h4', null, `Commands (${plan.driver})`),
       h('pre', { class: 'mono-box tall' }, text || '(nothing to run)'),
-      plan.canApply ? h('label', { class: 'chk' }, save, 'Save to startup-config (write memory) after the commands') : null,
+      (plan.files || []).map(fileDiff),
+      plan.canApply ? h('div', { class: 'chg-opts' },
+        sf.backup ? h('p', { class: 'small' }, 'Before the commands, LabTracer keeps a backup of the config (Drift tab › Backups).') : null,
+        sf.rollback ? h('label', { class: 'chk' }, rb, ` minutes: rollback timer (0 = off): ${sf.rollback}.`) : null,
+        sf.restore ? h('label', { class: 'chk' }, restore, 'If the device refuses a command, put the backup back') : null,
+        sf.save ? h('label', { class: 'chk' }, save, 'Save to startup-config (write memory) after the change is confirmed') : null) : null,
       h('p', { class: 'muted small' }, plan.canApply
-        ? 'Apply runs exactly these commands over SSH, stops at the first one the device refuses, then reads the device again. Send to console pastes them into the SSH console for you to run.'
-        : 'This platform has no automatic apply. Send to console pastes the commands into the SSH console; check them and press Enter to run them.')),
+        ? 'Apply runs exactly these commands over SSH and stops at the first one that fails. Then LabTracer connects again (to check that the device can still be reached), confirms the change and reads the device again. Stage adds the change to a change set, to apply it later together with changes on other devices.'
+        : 'This device has no automatic apply. Send to console pastes the commands into the SSH console; check them and press Enter to run them. Stage adds them to a change set.')),
     buttons, { wide: true });
   }
 
@@ -232,7 +245,7 @@ export class Collector {
     app.ssh.paste(d.id, text);
   }
 
-  async applyPlan(d, plan, save) {
+  async applyPlan(d, plan, opts) {
     let password = null;
     if (sshConf(d).auth === 'password') {
       password = await askPassword(`${sshConf(d).user ? sshConf(d).user + '@' : ''}${sshHost(d)}`, 'The password goes to server.py to apply these changes. It is not saved.');
@@ -241,7 +254,7 @@ export class Collector {
     toast(`Applying to ${d.name}…`, 'info', 2500);
     let job;
     try {
-      job = await postJson('/api/remediate/apply', { planId: plan.planId, save, password });
+      job = await postJson('/api/remediate/apply', { planId: plan.planId, ...opts, password });
       password = null;
       job = await this.follow(job);
     } catch (e) { toast('Apply: ' + e.message, 'err', 7000); return; }
@@ -252,6 +265,8 @@ export class Collector {
     modal(ok ? `Applied to ${d.name}` : `Not fully applied to ${d.name}`, h('div', null,
       ok ? h('p', { class: 'ok small' }, 'The device took every command. The drift report shows the device as read after the change.')
         : h('div', { class: 'warn small' }, r.error || 'The apply did not finish.'),
+      r.rolledBack ? h('p', { class: 'small' }, 'The backup was put back.') : null,
+      r.backup ? h('p', { class: 'muted small' }, `Backup before the change: ${r.backup} (Drift tab › Backups).`) : null,
       r.transcript ? h('pre', { class: 'mono-box tall' }, r.transcript) : null), [{ label: 'Close' }], { wide: true });
   }
 

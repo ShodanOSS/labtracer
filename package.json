@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/build.test.mjs tests/history.test.mjs tests/inventory.test.mjs tests/migrations.test.mjs tests/drift.test.mjs tests/nagios.test.mjs",
+    "test": "node --test tests/build.test.mjs tests/history.test.mjs tests/inventory.test.mjs tests/migrations.test.mjs tests/drift.test.mjs tests/nagios.test.mjs tests/discover.test.mjs",
     "test:py": "node tests/run-py.mjs",
     "test:ui": "node --test tests/ui.test.mjs",
     "test:all": "npm test && npm run test:py && npm run test:ui",
@@ -20,6 +20,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "esbuild": "^0.24.0",
+    "guacamole-common-js": "1.5.0",
     "puppeteer-core": "^23.11.1",
     "three": "^0.170.0"
   }
