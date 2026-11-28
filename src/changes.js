@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Staged changes over many devices, backups and the audit log (server side: collector/changes.py,
 // backups.py, audit.py).
 //

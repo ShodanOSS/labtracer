@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pre-change backups: data/backups/<lab>/<device id>/<backup id>.json.
 
 Before LabTracer applies a change to a device it reads the device's config and keeps it

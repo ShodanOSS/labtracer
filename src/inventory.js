@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inventory view: a sortable, filterable table of every item in the lab,
 // plus CSV export and CSV import (new items and updates by name or serial).
 import { h, clear, download, pickFile, readFileText, parseCIDR, clone, fmtTime } from './util.js';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Simplified network simulator: VLAN-aware layer 2 flooding plus
 // hop-by-hop IPv4 routing. Good enough to catch the classic homelab
 // mistakes: wrong VLAN on a port, missing trunk VLAN, missing route,

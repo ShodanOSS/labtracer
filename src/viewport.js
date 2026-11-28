@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Three.js viewport with two modes: logical topology and physical room.
 // Renders on demand only (no idle GPU/CPU use).
 import * as THREE from 'three';

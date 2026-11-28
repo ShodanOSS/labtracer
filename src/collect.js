@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Collector client. Asks server.py to read devices over SSH (collector/) and keeps the
 // facts of the open lab; the drift report (src/drift.js) compares them with the model.
 // It also pushes reviewed changes to a device (remediation).

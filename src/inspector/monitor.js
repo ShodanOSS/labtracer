@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector: the Monitor tab of a device, and the monitoring agent section of the lab panel.
 import { h, ap, fmtTime } from '../util.js';
 import { devById } from '../model.js';

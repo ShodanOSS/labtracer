@@ -1,0 +1,19 @@
+LabTracer
+Copyright 2026 The LabTracer Authors
+
+This product includes software developed at
+The Apache Software Foundation (https://www.apache.org/).
+
+-------------------------------------------------------------------------------
+This product bundles the Apache Guacamole JavaScript client
+(guacamole-common-js 1.5.0) in app/guac.js, which carries the following notice:
+
+Apache Guacamole
+Copyright 2020 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (https://www.apache.org/).
+
+-------------------------------------------------------------------------------
+Other bundled third-party components and their licenses are listed in
+THIRD_PARTY_NOTICES.md.

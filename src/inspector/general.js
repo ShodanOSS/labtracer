@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector, General tab: name, vendor, inventory fields, attributes, notes.
 import { h, ap } from '../util.js';
 import { INV_STATUS, isDeployed, warrantyState } from '../model.js';

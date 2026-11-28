@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Left panel: device library + custom object editor.
 import { h, clear, uid, clone, readFileDataURL, pickFile, readFileText, download } from './util.js';
 import { CATEGORY_ORDER, SHAPES, FACES, PORT_KINDS, P } from './templates.js';

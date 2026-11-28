@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Procedural low-poly device models. One canvas texture per device face
 // keeps draw calls low (good for integrated GPUs). Units are metres.
 // Model origin: bottom centre. Front faces +Z.

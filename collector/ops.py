@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Remediation operations: the planned state, as data, that LabTracer may push to a device.
 
 The browser never sends command text. It sends operations such as

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Monitoring backends for live status. Standard library only.
 
 Every backend answers status(cfg, targets) with the format of the check agent's /status,

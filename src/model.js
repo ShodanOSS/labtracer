@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Lab document model and helpers.
 import { BUILTIN, RACK_U } from './templates.js';
 import { uid, clone } from './util.js';

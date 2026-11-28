@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector, Routing and Services tabs: static routes, live routing table, ping test,
 // VLAN database, wireless SSIDs, and the services that run on the device.
 import { h, ap, clear, parseCIDR, ipToInt } from '../util.js';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // IOS-flavoured command line for any device. Commands edit the same
 // device model that the properties panel edits.
 import { parseCIDR, intToIp, prefixToMask, maskToPrefix, ipToInt, uid } from './util.js';

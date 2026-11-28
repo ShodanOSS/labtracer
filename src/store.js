@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Persistence. "server" mode talks to server.py (files on disk).
 // "local" mode (index.html opened directly) uses browser storage plus
 // file import/export.

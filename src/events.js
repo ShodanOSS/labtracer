@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Live updates from server.py over one WebSocket (/api/events): monitor status, collect
 // and apply jobs, new facts. Reconnects by itself. Features that use it fall back to HTTP
 // polling while it is down, so nothing depends on it.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """SSH connections for the collector: run commands and read their output.
 
 Uses ssh_bridge.open_client, so the collector and the console use the same
@@ -23,7 +24,8 @@ class HostKeyUnknown(Exception):
         self.host, self.keytype, self.fingerprint = host, keytype, fp
 
 
-def _policy(trust_fp):
+def _policy(trust_fp, on_trust=None):
+    """on_trust(host, keytype, fingerprint): called when a new host key is saved (for the audit log)."""
     pm = ssh_bridge.paramiko
 
     class TrustOnce(pm.MissingHostKeyPolicy):
@@ -31,6 +33,11 @@ def _policy(trust_fp):
             fp = ssh_bridge.fingerprint(key)
             if trust_fp is True or (trust_fp and trust_fp == fp):  # True: trust on first use (discovery, opt-in)
                 ssh_bridge.remember_host_key(client, hostname, key)
+                if on_trust:
+                    try:
+                        on_trust(hostname, key.get_name(), fp)
+                    except Exception:  # noqa: BLE001  (logging must not stop the connection)
+                        pass
                 return
             raise HostKeyUnknown(hostname, key.get_name(), fp)
     return TrustOnce()
@@ -45,10 +52,10 @@ class Session:
         self._shell = None
 
     @classmethod
-    def open(cls, p, password=None, trust=None):
+    def open(cls, p, password=None, trust=None, on_trust=None):
         if ssh_bridge.load_paramiko() is None:
             raise ValueError("paramiko is not installed. Run: pip install paramiko")
-        return cls(ssh_bridge.open_client(p, password, _policy(trust)), p["host"])
+        return cls(ssh_bridge.open_client(p, password, _policy(trust, on_trust)), p["host"])
 
     def run(self, cmd, timeout=CMD_TIMEOUT, stdin=None):
         """Run one command (exec channel, no pty). Returns (exit status, stdout, stderr) as text.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector: the Drift tab of a device (planned model vs what the device reports) and the
 // drift section of the lab panel. Facts come from the collector (src/collect.js).
 import { h, ap, uid, fmtTime } from '../util.js';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Discovery: find the devices of an unknown network and add them to the lab.
 //   GUI --POST /api/discover/<lab> {ranges, ssh, crawl...}--> server.py (collector/discover.py):
 //        sweep, names, SSH read with the collector drivers, crawl LLDP/CDP and ARP tables
@@ -188,7 +189,7 @@ export class Discovery {
     this.app = app;
     this.job = null;
     this.result = null;
-    this.form = { ranges: '', user: '', keyFile: '', auth: 'key', port: 22, legacy: false, crawl: true, subnets: false, tofu: false };
+    this.form = { ranges: '', user: '', keyFile: '', auth: 'key', port: 22, legacy: false, crawl: true, subnets: false, tofu: false, allowPublic: false };
     app.events?.on('job', m => { if (m.job?.kind === 'discover' && m.job.id === this.job?.id) { this.job = m.job; this.app.inspector?.render(); } });
   }
   get available() { return this.app.store.mode === 'server'; }
@@ -216,14 +217,15 @@ export class Discovery {
     const chk = (k, label) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f[k], onchange: e => { f[k] = e.target.checked; } }), label);
     modal('Discover the network', h('div', null,
       h('label', { class: 'fld' }, h('span', null, 'Addresses to sweep'), inp('ranges', { mono: true, ph: '192.168.1.0/24, 10.0.0.1-50, 10.0.5.7' }),
-        h('small', null, 'Subnets, ranges and addresses, separated by commas. At most 4096 addresses.')),
+        h('small', null, 'Subnets, ranges and addresses, separated by commas. At most 4096 addresses. Link-local addresses (169.254.x.x) are never swept.')),
+      chk('allowPublic', 'Allow public addresses (only networks you own or are allowed to scan; the run is logged)'),
       h('h4', null, 'SSH login for reading devices (optional)'),
       h('div', { class: 'row2' }, h('label', { class: 'fld' }, h('span', null, 'User'), inp('user', { mono: true, ph: 'admin' })), h('label', { class: 'fld' }, h('span', null, 'Port'), inp('port', { type: 'number' }))),
       h('label', { class: 'fld' }, h('span', null, 'Key file'), inp('keyFile', { mono: true, ph: '~/.ssh/id_ed25519 (empty: ssh-agent and default keys)' })),
       h('label', { class: 'fld' }, h('span', null, 'Login'), h('select', { class: 'inp', onchange: e => { f.auth = e.target.value; } },
         h('option', { value: 'key', selected: f.auth === 'key' ? 'selected' : null }, 'Key / ssh-agent'), h('option', { value: 'password', selected: f.auth === 'password' ? 'selected' : null }, 'Password (asked now, not saved)'))),
       chk('legacy', 'Allow legacy algorithms (old devices)'),
-      chk('tofu', 'Trust the host key of devices seen for the first time (it is saved in data/ssh/known_hosts and logged). Off: you confirm each fingerprint.'),
+      chk('tofu', 'Trust the host key of devices seen for the first time (it is saved in data/ssh/known_hosts and logged). Key login only: a password is never sent to a host you have not confirmed. Off: you confirm each fingerprint.'),
       h('h4', null, 'Crawl'),
       chk('crawl', 'Follow LLDP/CDP neighbors and ARP tables of the devices read (private addresses only)'),
       chk('subnets', 'Also sweep the connected subnets of the devices read (/22 or smaller)'),
@@ -237,7 +239,7 @@ export class Discovery {
     if (f.user && f.auth === 'password') { const { askPassword } = await import('./sshterm.js'); password = await askPassword(`${f.user}@ (discovery)`, 'Used for this discovery only. It is not saved.'); if (password === null) return; }
     try {
       const r = await fetch(this.base(), { method: 'POST', headers: HDR, body: JSON.stringify({
-        ranges: only ? [] : f.ranges.split(/[,\s]+/).filter(Boolean), only, trust, password, crawl: f.crawl, subnets: f.subnets, tofu: f.tofu,
+        ranges: only ? [] : f.ranges.split(/[,\s]+/).filter(Boolean), only, trust, password, crawl: f.crawl, subnets: f.subnets, tofu: f.tofu, allowPublic: f.allowPublic,
         ssh: f.user || f.keyFile ? { user: f.user, keyFile: f.keyFile, auth: f.auth, port: f.port || 22, legacy: f.legacy } : null }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText);
       password = null;

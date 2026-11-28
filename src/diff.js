@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Line diff (LCS). Fine for config-sized text (a few thousand lines).
 export function lineDiff(a, b) {
   const A = String(a ?? '').split('\n'), B = String(b ?? '').split('\n');

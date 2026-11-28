@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // App: the File menu. New, open, save as, import, export, delete, and the help dialog.
 import { h, download, pickFile, readFileText, safeName, fmtTime } from '../util.js';
 import { store, makeTar } from '../store.js';

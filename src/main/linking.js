@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // App: the link tool. Pick a port on each device and connect them.
 import { uid } from '../util.js';
 import { devById, portById, linksOfPort, portIsFree, removePort, portFamily, makePort, LINKABLE, MULTI_LINK } from '../model.js';

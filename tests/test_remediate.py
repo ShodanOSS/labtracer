@@ -227,12 +227,63 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(item["backup"], "a backup is taken before the change")
         self.assertEqual(store.read("lab", "dev_1")["facts"]["collected"], 5, "the device is read again after the change")
 
+    def test_a_queued_push_still_gets_the_password(self):
+        """The job runs after apply() returned (all workers busy): it must still have the password."""
+        r = collector.plan("lab", {"device": {**self.dev, "driver": "ios", "auth": "password"}, "ops": self.ops})
+        later = []
+        seen = {}
+        with mock.patch.object(collector._pool, "submit", side_effect=lambda fn, *a: later.append((fn, a))), \
+                mock.patch.object(collector, "push", side_effect=lambda job, it, pw, *rest, **kw: seen.setdefault("pw", pw)):
+            collector.apply({"planId": r["planId"], "password": "s3cret"})
+            for fn, a in later:
+                fn(*a)
+        self.assertEqual(seen["pw"], "s3cret")
+
+    def test_a_backup_is_restored_only_to_its_own_host(self):
+        backups.save("lab", "dev_1", {"id": "20260101-000000-abcdef", "ts": 1, "name": "sw1", "host": "192.0.2.10",
+                                      "driver": "ios", "config": "hostname sw1\n"})
+        body = {"backup": "20260101-000000-abcdef", "device": {**self.dev, "host": "198.51.100.66"}}
+        with mock.patch.object(ssh_bridge, "validate", side_effect=lambda p: {**p, "port": 22, "auth": "key"}), \
+                mock.patch.object(collector._pool, "submit") as submit, \
+                self.assertRaisesRegex(ValueError, "only restored to the host it came from"):
+            collector.restore("lab", body)
+        submit.assert_not_called()
+        self.assertEqual(audit.read("lab")[0]["event"], "restore-refused")
+
     def test_plan_without_paramiko_can_still_be_sent_to_the_console(self):
         with mock.patch.object(ssh_bridge, "validate", side_effect=ValueError("paramiko is not installed")):
             r = collector.plan("lab", {"device": {**self.dev, "driver": "ios"}, "ops": self.ops})
         self.assertFalse(r["canApply"])
         self.assertTrue(r["commands"])
         self.assertIn("paramiko", r["notes"][0])
+
+
+class KeyFileTest(unittest.TestCase):
+    def test_key_files_only_from_the_allowed_folders(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            ok, other = Path(a) / "id_test", Path(b) / "secret.txt"
+            ok.write_text("key")
+            other.write_text("not a key")
+            with mock.patch.dict("os.environ", {"LABTRACER_KEY_DIRS": a}):
+                self.assertEqual(Path(ssh_bridge.key_path(str(ok))), ok.resolve())
+                for bad in (str(other), str(Path(a) / ".." / Path(b).name / "secret.txt"), str(Path(a) / "missing")):
+                    with self.subTest(bad), self.assertRaisesRegex(ValueError, "must be in ~/.ssh"):
+                        ssh_bridge.key_path(bad)
+
+
+class HostKeyAuditTest(unittest.TestCase):
+    @unittest.skipIf(ssh_bridge.load_paramiko() is None, "paramiko is not installed")
+    def test_a_saved_host_key_is_reported(self):
+        from collector import conn
+        seen = []
+        key = mock.Mock()
+        key.get_name.return_value = "ssh-ed25519"
+        with mock.patch.object(ssh_bridge, "fingerprint", return_value="SHA256:x"), \
+                mock.patch.object(ssh_bridge, "remember_host_key"):
+            conn._policy("SHA256:x", lambda *a: seen.append(a)).missing_host_key(mock.Mock(), "192.0.2.1", key)
+            with self.assertRaises(conn.HostKeyUnknown):
+                conn._policy(None, lambda *a: seen.append(a)).missing_host_key(mock.Mock(), "192.0.2.2", key)
+        self.assertEqual(seen, [("192.0.2.1", "ssh-ed25519", "SHA256:x")])
 
 
 if __name__ == "__main__":

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+/*! LabTracer | Copyright 2026 The LabTracer Authors | @license Apache-2.0
+ * Bundled third-party code and licenses: NOTICE and THIRD_PARTY_NOTICES.md */
 // LabTracer app shell: state, undo, persistence, tools, keyboard.
 import { h, clear, mixin, safeName } from './util.js';
 import { store } from './store.js';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector, Physical tab: room, position, rack mounting, size, rack elevation.
 import { h, ap } from '../util.js';
 import { devById, isRack, isFurniture, rackOccupancy, rackFits, rackFirstFree } from '../model.js';

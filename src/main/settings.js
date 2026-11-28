@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // App: the Settings dialog and the toolbar toggles that share its values.
 import { h } from '../util.js';
 import { store } from '../store.js';

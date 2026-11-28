@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Built-in device templates. Dimensions are in metres (w = width, h = height, d = depth).
 // Custom templates made in the app use the same shape and live in data/library.json.
 

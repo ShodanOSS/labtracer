@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Driver registry.
 
 A driver is a module with:

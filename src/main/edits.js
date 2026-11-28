@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // App: edits of the selection (delete, duplicate, rotate) and custom object templates.
 import { uid } from '../util.js';
 import { devById, removeDevice, duplicateDevice } from '../model.js';

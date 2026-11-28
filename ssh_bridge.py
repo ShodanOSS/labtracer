@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """SSH bridge for the LabTracer console.
 
 The browser can not open SSH connections, so server.py relays a terminal:
@@ -146,6 +147,34 @@ def caps():
 
 
 # ---------------------------------------------------------------- validation and session ids
+def key_dirs():
+    """Folders a key file may be in: ~/.ssh, data/ssh, and the folders in LABTRACER_KEY_DIRS
+    (separated by os.pathsep). A request can not make LabTracer use any file it can read."""
+    dirs = [os.path.expanduser("~/.ssh"), str(KNOWN_HOSTS.parent)]
+    dirs += [d for d in os.environ.get("LABTRACER_KEY_DIRS", "").split(os.pathsep) if d.strip()]
+    return [os.path.realpath(os.path.expanduser(d.strip())) for d in dirs]
+
+
+def _inside(path, folder):
+    try:
+        return os.path.commonpath([os.path.normcase(path), os.path.normcase(folder)]) == os.path.normcase(folder)
+    except ValueError:  # another drive (Windows)
+        return False
+
+
+def key_path(key):
+    """The real path of a key file in one of key_dirs(). A name without a folder is looked up
+    in ~/.ssh. The error is the same for a missing file and a file outside these folders."""
+    key = os.path.expanduser(key)
+    if not os.path.isabs(key):
+        key = os.path.join(os.path.expanduser("~/.ssh"), key)
+    real = os.path.realpath(key)
+    if os.path.basename(key).startswith("-") or not any(_inside(real, d) for d in key_dirs()) or not os.path.isfile(real):
+        raise ValueError("key file not found. It must be in ~/.ssh, in data/ssh, or in a folder named in "
+                         "the LABTRACER_KEY_DIRS environment variable")
+    return real
+
+
 def validate(p):
     if not isinstance(p, dict):
         raise ValueError("bad request")
@@ -170,9 +199,7 @@ def validate(p):
         raise ValueError("auth must be key or password")
     key = str(p.get("keyFile") or "").strip()
     if key:
-        key = os.path.expanduser(key)
-        if key.startswith("-") or not os.path.isfile(key):
-            raise ValueError(f"key file not found: {key}")
+        key = key_path(key)
     if engine == "paramiko" and paramiko is None:
         raise ValueError("paramiko is not installed. Run: pip install paramiko  (or select the System ssh engine)")
     if engine == "system":
@@ -205,7 +232,8 @@ def notices(p):
 def new_session(p):
     if not ENABLED:
         raise PermissionError("the SSH console is off because server.py listens on a network address")
-    p = validate(p)
+    where = {k: str(p.get(k) or "")[:120] for k in ("lab", "device", "name")} if isinstance(p, dict) else {}
+    p = {**validate(p), **where}  # lab, device, name: only for the audit log
     now = time.time()
     with _lock:
         for k in [k for k, (_, exp) in _pending.items() if exp < now]:
@@ -384,7 +412,7 @@ class ParamikoEngine:
         self.chan = None
 
     def _policy(self):
-        ws, trust_q = self.ws, self.trust_q
+        ws, trust_q, self_p = self.ws, self.trust_q, self.p
 
         class AskUser(paramiko.MissingHostKeyPolicy):
             def missing_host_key(self, client, hostname, key):
@@ -396,6 +424,7 @@ class ParamikoEngine:
                 if not ok:
                     raise paramiko.SSHException("host key not trusted")
                 remember_host_key(client, hostname, key)
+                _audit(self_p, "hostkey-trusted", keytype=key.get_name(), fingerprint=fingerprint(key), via="console")
                 ws.send_json({"type": "status", "text": f"Host key saved in {KNOWN_HOSTS}"})
         return AskUser()
 
@@ -551,11 +580,23 @@ def _err_text(exc):
 
 
 # ---------------------------------------------------------------- one session over one WebSocket
+audit_hook = None  # set by server.py: fn(lab, event, **fields); lab "" = the server-wide log
+
+
+def _audit(p, event, **kw):
+    if audit_hook:
+        try:
+            audit_hook(p.get("lab") or "", event, dev=p.get("device") or None, name=p.get("name") or None, host=p["host"],
+                       port=p["port"], login=p["user"] or None, engine=p["engine"], **kw)  # "user" = who ran LabTracer
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def run(ws: WebSocket, p):
     """Blocks until the session ends. Called on the HTTP handler thread."""
     trust_q = queue.Queue()
     eng = (ParamikoEngine if p["engine"] == "paramiko" else SystemEngine)(p, ws, trust_q)
-    state = {"up": False, "last": time.time(), "done": False}
+    state = {"up": False, "last": time.time(), "done": False, "started": time.time()}
     with _lock:
         _live.add(id(ws))
 
@@ -563,6 +604,10 @@ def run(ws: WebSocket, p):
         if state["done"]:
             return
         state["done"] = True
+        if state["up"]:
+            _audit(p, "ssh-close", seconds=round(time.time() - state["started"]))
+        else:
+            _audit(p, "ssh-failed", error=(error or reason or "")[:300])
         if error:
             ws.send_json({"type": "error", "text": error})
         ws.send_json({"type": "closed", "text": reason or "Connection closed."})
@@ -578,6 +623,8 @@ def run(ws: WebSocket, p):
         finally:
             password = None  # noqa: F841 (drop the reference)
         state["up"] = True
+        state["started"] = time.time()
+        _audit(p, "ssh-open")
         ws.send_json({"type": "connected"})
         try:
             while not state["done"]:

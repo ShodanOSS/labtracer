@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // App: put devices into the lab: place from the palette, add inventory items, drag,
 // mount in racks, sit on furniture, snap to walls.
 import {

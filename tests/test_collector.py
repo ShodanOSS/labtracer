@@ -22,7 +22,7 @@ FIX = ROOT / "tests" / "collect-fixtures"
 sys.path.insert(0, str(ROOT))
 import collector  # noqa: E402
 import ssh_bridge  # noqa: E402
-from collector import drivers, store  # noqa: E402
+from collector import audit, drivers, store  # noqa: E402
 from collector.drivers import ios, linux, routeros  # noqa: E402
 from collector.facts import cidr, norm_dest, norm_mac, sections  # noqa: E402
 
@@ -184,6 +184,16 @@ class StoreTest(unittest.TestCase):
 
 
 class JobTest(unittest.TestCase):
+    def setUp(self):
+        """Collect runs are written to the audit log: keep it out of ./data."""
+        tmp = tempfile.TemporaryDirectory()
+        patch = mock.patch.object(audit, "AUDIT_DIR", Path(tmp.name) / "audit")
+        patch.start()
+        audit.reset_cache()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(audit.reset_cache)
+        self.addCleanup(patch.stop)
+
     def test_bad_params_fail_without_connecting(self):
         with mock.patch.object(ssh_bridge, "validate", side_effect=ValueError("host must be an IP address or a DNS name")):
             snap = collector.start("lab", {"devices": [{"id": "dev_1", "host": "-oProxyCommand=x"}]})
@@ -198,7 +208,7 @@ class JobTest(unittest.TestCase):
     def test_password_is_not_kept(self):
         seen = {}
 
-        def fake_open(p, password=None, trust=None):
+        def fake_open(p, password=None, trust=None, on_trust=None):
             seen["pw"] = password
             raise ValueError("refused")
         with mock.patch.object(ssh_bridge, "validate", side_effect=lambda d: {**d, "auth": "password", "host": "h"}), \

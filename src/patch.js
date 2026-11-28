@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Structural diff and patch for JSON data (the lab document). Used by the undo history:
 // it keeps the small change of each edit instead of a full copy of the lab.
 //

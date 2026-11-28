@@ -1,7 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
 // Real SSH console. server.py relays a terminal between xterm.js (here)
 // and the device: browser <-WebSocket-> server.py <-SSH-> device.
 // Nothing secret is kept: a password (only with the per-device override)
 // is sent once to server.py for one connect.
+/*! xterm.js 5.5.0 and @xterm/addon-fit 0.10.0
+ * Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+ * Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
+ * Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
+ * @license MIT: full text in THIRD_PARTY_NOTICES.md */
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -104,7 +110,7 @@ export class SshManager {
     this.setStatus(s, `Connecting to ${host}…`);
     let sid, notes;
     try {
-      const r = await fetch('/api/ssh/session', { method: 'POST', headers: HDR, body: JSON.stringify({ host, port: c.port, user: c.user, engine, auth: c.auth, keyFile: c.keyFile, legacy: c.legacy }) });
+      const r = await fetch('/api/ssh/session', { method: 'POST', headers: HDR, body: JSON.stringify({ host, port: c.port, user: c.user, engine, auth: c.auth, keyFile: c.keyFile, legacy: c.legacy, lab: this.app.labName || '', device: d.id, name: d.name }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || r.statusText);
       sid = j.sid; notes = j.notices || [];

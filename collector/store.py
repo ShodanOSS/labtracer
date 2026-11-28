@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Observed state: data/observed/<lab>/<device id>.json.
 
 Kept apart from the lab file: facts change all the time, and the lab file is the

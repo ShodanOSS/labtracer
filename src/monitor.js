@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Live status from the LabTracer check agent (agent/labtracer_agent.py).
 // LabTracer sends the agent a target list built from the lab. server.py polls the agent
 // and pushes the results over /api/events (src/events.js); while that WebSocket is down,

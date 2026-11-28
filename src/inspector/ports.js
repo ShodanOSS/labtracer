@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector, Ports tab: the port table, port details, add and remove ports.
 import { h, ap, parseCIDR } from '../util.js';
 import { PORT_KINDS } from '../templates.js';

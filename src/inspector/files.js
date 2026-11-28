@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector, Configs tab: generated running-config, config files, snapshots and diffs.
 import { h, ap, uid, download, pickFile, readFileText, fmtTime, safeName } from '../util.js';
 import { runningConfig } from '../cli.js';

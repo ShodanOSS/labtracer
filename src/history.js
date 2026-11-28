@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Undo and redo for the lab. Each step keeps only what changed (src/patch.js), in both
 // directions, so the history of a large lab with many config snapshots stays small.
 // No DOM: tests/history.test.mjs runs it in Node.

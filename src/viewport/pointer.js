@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Viewport: mouse input. Picking, dragging devices, clicks for the place and link tools,
 // drag and drop from the palette.
 import * as THREE from 'three';

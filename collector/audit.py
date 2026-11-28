@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Audit log: data/audit/<lab>.jsonl. One JSON object per line, append only.
 
 Every change LabTracer makes to a real device, and every step around it, is written here:
@@ -7,6 +8,12 @@ timers, confirmations, restores, discovery runs and remote sessions.
 Each entry has the hash of the entry before it ("prev") and its own hash ("hash"), so an
 edited or deleted line breaks the chain and verify() shows where. This shows tampering;
 it does not prevent it (anyone who can write the file can rebuild the chain).
+
+data/audit/.heads.json keeps the number and hash of the last entry of each log, so lines cut
+from the end of a log (which leave a valid chain) also show in verify().
+
+Events that belong to no lab (settings of the server, sessions opened without a lab) go to
+the server log, data/audit/.server.jsonl: record(SERVER, ...).
 """
 
 import getpass
@@ -22,12 +29,38 @@ AUDIT_DIR = Path(__file__).resolve().parent.parent / "data" / "audit"
 MAX_TEXT = 64 * 1024  # a transcript longer than this is cut (the backup keeps the full config)
 NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 GENESIS = "0" * 64
+SERVER = ".server"  # the server-wide log; no lab name can become this (_safe strips the dot)
+HEADS = ".heads.json"
 _lock = threading.Lock()
 _last = {}  # lab -> (seq, hash): no full read of the file on each record
 
 
 def _safe(name):
+    if name == SERVER:
+        return SERVER
     return NAME_RE.sub("-", (name or "").strip()).strip(".-")[:120] or "x"
+
+
+def _heads():
+    try:
+        with open(AUDIT_DIR / HEADS, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_head(lab, seq, h):
+    """Remember the last entry of a log. Written after the entry: a crash in between leaves
+    the head one entry behind, which verify() accepts."""
+    heads = _heads()
+    heads[lab] = {"seq": seq, "hash": h}
+    tmp = AUDIT_DIR / (HEADS + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(heads, fh, separators=(",", ":"))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, AUDIT_DIR / HEADS)
 
 
 def _path(lab):
@@ -95,6 +128,7 @@ def record(lab, event, **fields):
                 fh.flush()
                 os.fsync(fh.fileno())
             _last[lab] = (entry["seq"], entry["hash"])
+            _save_head(lab, entry["seq"], entry["hash"])
             return entry
     except Exception as exc:  # noqa: BLE001
         print(f"audit: could not write {event} for {lab}: {exc}")
@@ -124,10 +158,14 @@ def read(lab, device=None, limit=500, before=None):
 
 def verify(lab):
     """{ok, entries, broken: seq of the first bad entry or None, why}."""
-    p = _path(_safe(lab))
+    lab = _safe(lab)
+    p = _path(lab)
+    head = _heads().get(lab) or {}
     if not p.is_file():
+        if head.get("seq"):
+            return {"ok": False, "entries": 0, "broken": 1, "why": f"the log was deleted: it had {head['seq']} entries"}
         return {"ok": True, "entries": 0, "broken": None, "why": ""}
-    prev, n = GENESIS, 0
+    prev, n, last_seq = GENESIS, 0, 0
     with open(p, encoding="utf-8") as fh:
         for i, line in enumerate(fh, 1):
             try:
@@ -138,7 +176,14 @@ def verify(lab):
                 return {"ok": False, "entries": n, "broken": e.get("seq", i), "why": f"entry {e.get('seq', i)} does not follow the entry before it (a line was removed or changed)"}
             if _digest(e) != e.get("hash"):
                 return {"ok": False, "entries": n, "broken": e.get("seq", i), "why": f"entry {e.get('seq', i)} was changed after it was written"}
-            prev, n = e["hash"], n + 1
+            prev, n, last_seq = e["hash"], n + 1, int(e.get("seq", 0) or 0)
+    want = int(head.get("seq") or 0)
+    if want > last_seq:
+        return {"ok": False, "entries": n, "broken": last_seq + 1,
+                "why": f"entries {last_seq + 1} to {want} were removed from the end of the log"}
+    if want and want == last_seq and head.get("hash") != prev:
+        return {"ok": False, "entries": n, "broken": last_seq,
+                "why": f"entry {last_seq} is not the entry that was written last (the end of the log was replaced)"}
     return {"ok": True, "entries": n, "broken": None, "why": ""}
 
 

@@ -29,7 +29,7 @@ All data stays on your computer. The app does not connect to the internet. The S
 - Configs and consoles: [Config files](#config-files-and-snapshots) · [Console commands](#console-commands) · [SSH console](#ssh-console) · [Network simulator](#network-simulator)
 - Real devices: [Live status](#live-status) · [Nagios](#nagios) · [Other monitoring systems](#other-monitoring-systems) · [Discover a network](#discover-a-network) · [Drift](#drift-model-vs-device) · [Push](#push-the-model-to-a-device) · [Change sets and audit log](#change-sets-and-audit-log) · [Backups and recovery](#backups-and-recovery) · [Remote access](#remote-access-guacamole)
 - Other: [Custom objects](#custom-objects) · [Keyboard](#keyboard) · [Colours](#colours) · [Performance](#performance-on-older-pcs) · [Security](#security) · [Git](#git)
-- Development: [Rebuild from source](#rebuild-from-source) · [Change the lab format](#change-the-lab-format) · [Tests](#tests) · [Files](#files)
+- Development: [Rebuild from source](#rebuild-from-source) · [Change the lab format](#change-the-lab-format) · [Tests](#tests) · [Files](#files) · [License](#license)
 
 ## Requirements
 
@@ -662,19 +662,23 @@ If the app is slow:
 - Write requests must have the `X-LabTracer` header. A web page from a different origin cannot send it.
 - File names are cleaned. The server cannot write outside the `data` folder.
 - The server sends a Content Security Policy that blocks scripts from other origins.
-- There is no authentication. Do not expose the port to a network.
-- The SSH console is off when server.py listens on an address that is not loopback.
+- There is no authentication. Do not expose the port to a network, and do not run LabTracer on a computer that other people log in to: every user of that computer can use the port. See [SECURITY.md](SECURITY.md).
+- The SSH console is off when server.py listens on an address that is not loopback. So are collect, push, restore, discovery, remote access, and every change to change sets, backups and remote access settings.
 - An SSH session starts with a POST request that must have the `X-LabTracer` header. The server answers with a one-time session ID, which is valid for 30 seconds. The WebSocket must give this ID and must come from the LabTracer page (Origin check).
-- Host, user and key path are validated. server.py starts `ssh` with an argument list, not with a shell.
+- Host, user and key path are validated. A key file must be in `~/.ssh`, in `data/ssh`, or in a folder named in the `LABTRACER_KEY_DIRS` environment variable (separated by `;` on Windows, `:` elsewhere). A key name without a folder is looked up in `~/.ssh`. server.py starts `ssh` with an argument list, not with a shell.
 - SSH passwords are never stored. New host keys need your confirmation. Changed host keys are refused.
 - Collect and Push (drift) use the same rules as the SSH console: off on a network address, passwords used for one run only, new host keys confirmed by you. Collect only reads devices.
 - Push takes operations, not command text, from the browser. Each value is checked against a strict pattern (interface names, addresses, VLAN numbers and lists, names), and the device driver writes the commands. Apply runs a reviewed plan once, within 10 minutes.
 - The live events WebSocket (`/api/events`) checks the Origin like the SSH console. It carries no secrets.
 - A change set is applied only in the version you reviewed (a digest of every device's commands and files). Each change is logged with its commands and transcript in a hash-chained audit log.
 - Linux push: LabTracer writes a config file only when it is the same as at the last collect, and stops at the first command that fails. It needs root or `sudo -n`; it never asks for or stores a sudo password.
-- Discovery uses the same rules as Collect: off on a network address, read-only, passwords for one run only. It sweeps only the ranges you type; with Crawl, also the private addresses that your devices report. "Trust the host key of devices seen for the first time" is off by default, and each key it saves is logged.
+- Discovery uses the same rules as Collect: off on a network address, read-only, passwords for one run only. It sweeps only the ranges you type; with Crawl, also the private addresses that your devices report. Link-local (169.254.x.x) and reserved addresses are never swept. Public addresses need "Allow public addresses", which is logged. At most two discoveries run at the same time.
+- "Trust the host key of devices seen for the first time" is off by default, and each key it saves is logged. It is used with key login only: a password is never sent to a host whose key you have not confirmed, so a fake SSH server in the swept range can not collect it.
+- Every host key that LabTracer saves is written to the audit log, whether it was confirmed in Collect, Push, Restore, Discovery or the SSH console.
 - Remote access (Guacamole) uses the same rules as the SSH console: off on a network address, a one-time session id, an Origin check, passwords for one connect only. The connection parameters come from a fixed list: drive mapping, printing, session recording and SFTP, which write files on the guacd host, can not be turned on. The browser may only send input and display instructions to guacd.
-- Monitoring backends are read-only. Their tokens and passwords are kept in `data/monitor.json`, like the agent token.
+- Monitoring backends are read-only. Their tokens and passwords are kept in `data/monitor.json`, like the agent token. A saved token or password is only sent to the address it was entered for: after you change the address, the monitoring system, the CA file, or turn off certificate checks, LabTracer asks for it again.
+- A backup is restored only to the host it was taken from. A Linux backup is checked before it is unpacked as root on the device: only files in the network config folders, no `..`, no links that leave the folder, no device files.
+- The audit log also records SSH console sessions, collect runs, and changes to the monitoring and remote access settings. Events that belong to no lab go to `data/audit/.server.jsonl`. `data/audit/.heads.json` remembers the last entry of each log, so entries cut from the end of a log show in Verify.
 
 ## Git
 
@@ -788,4 +792,12 @@ Run `npm run build` before `npm run test:ui`: the browser test uses `app/app.js`
 
 Each file in `src/main/`, `src/inspector/` and `src/viewport/` holds a part class. `mixin()` in `src/util.js` copies its methods onto `App`, `Inspector` or `Viewport`. A method name can be in only one file: a duplicate stops the app at startup with an error.
 
-Three.js and xterm.js (MIT licence) are bundled into `app/app.js` and `app/app.css`. The Apache Guacamole client (guacamole-common-js 1.5.0, Apache License 2.0) is bundled into `app/guac.js`.
+## License
+
+LabTracer is licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for the attribution that must go with copies of it.
+
+Third-party code is bundled into the prebuilt files: three.js and xterm.js (MIT) in `app/app.js` and `app/app.css`, and the Apache Guacamole client (guacamole-common-js 1.5.0, Apache License 2.0) in `app/guac.js`. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists each component with its license text. It also lists the components LabTracer uses but does not ship, such as paramiko and guacd.
+
+Contributions are accepted under the Apache License 2.0 (section 5 of the license). By opening a pull request, you agree that your contribution is licensed under the same terms.
+
+To report a security problem, see [SECURITY.md](SECURITY.md). Do not open a public issue.

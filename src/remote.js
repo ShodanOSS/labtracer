@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Remote access over Apache Guacamole: RDP, VNC, SSH and Telnet in a window of the app.
 //   browser (Guacamole client, app/guac.js) <-WebSocket-> server.py (guac.py) <-TCP-> guacd <-> device
 // app/guac.js loads on the first session only. A session lives in a floating window that

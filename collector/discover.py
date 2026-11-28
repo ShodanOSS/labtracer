@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Discovery: find the devices of a network that LabTracer does not know yet.
 
     GUI --POST /api/discover/<lab> {ranges, ssh, ...}--> job "discover"
@@ -45,13 +46,29 @@ TIMEOUT = 0.6
 SCAN_WORKERS = 96
 SSH_WORKERS = 4
 REFUSED = {errno.ECONNREFUSED, 10061}  # 10061: WSAECONNREFUSED (Windows)
+MAX_RUNNING = 2           # discovery runs at the same time, all labs together
 _running = {}
 _lock = threading.Lock()
 
 
 # ---------------------------------------------------------------- input
-def expand(ranges, limit=MAX_HOSTS):
-    """'192.168.1.0/24', '10.0.0.5-10.0.0.40', '10.0.0.5-40', '10.0.0.7' -> [ip strings]."""
+def _refused(ip, allow_public):
+    """Why an address is never swept, or "" when it may be.
+    Link-local (169.254/16, also the cloud metadata address) and reserved addresses are always
+    refused. Public addresses only with allow_public: scan only networks you are allowed to."""
+    if ip.is_link_local:
+        return f"{ip} is a link-local address (169.254.0.0/16), which discovery never sweeps"
+    if ip.is_reserved or int(ip) == 0xFFFFFFFF:
+        return f"{ip} is a reserved address"
+    if ip.is_global and not allow_public:
+        return (f"{ip} is a public internet address. Tick \"Allow public addresses\" only for networks "
+                "you are allowed to scan")
+    return ""
+
+
+def expand(ranges, limit=MAX_HOSTS, allow_public=False):
+    """'192.168.1.0/24', '10.0.0.5-10.0.0.40', '10.0.0.5-40', '10.0.0.7' -> [ip strings].
+    Raises ValueError for an address that is not allowed (see _refused)."""
     out, seen = [], set()
     for raw in ranges or []:
         r = str(raw).strip()
@@ -78,6 +95,9 @@ def expand(ranges, limit=MAX_HOSTS):
         for ip in ips:
             if ip.is_multicast or ip.is_unspecified or ip.is_loopback:
                 continue
+            why = _refused(ip, allow_public)
+            if why:
+                raise ValueError(f"{r[:40]}: {why}")
             s = str(ip)
             if s not in seen:
                 seen.add(s)
@@ -162,7 +182,10 @@ def start(lab, body, new_job, changed):
     with _lock:
         if _running.get(lab):
             raise ValueError("a discovery is already running for this lab")
-    targets = expand(body.get("ranges"))
+        if len(_running) >= MAX_RUNNING:
+            raise ValueError(f"{len(_running)} discoveries are running already: wait until one is finished")
+    allow_public = body.get("allowPublic") is True
+    targets = expand(body.get("ranges"), allow_public=allow_public)
     if not targets and not body.get("only"):
         raise ValueError("give at least one address, range or subnet")
     ssh = body.get("ssh") if isinstance(body.get("ssh"), dict) else {}
@@ -177,12 +200,15 @@ def start(lab, body, new_job, changed):
     job["discovery"] = {"phase": "sweep", "total": len(targets), "swept": 0, "alive": 0, "identified": 0, "hosts": 0}
     job["devices"]["discovery"] = {"state": "running", "name": "discovery"}  # the job is done when this is
     with _lock:
+        if _running.get(lab) or len(_running) >= MAX_RUNNING:  # another request was quicker
+            raise ValueError("a discovery started at the same time: try again when it is finished")
         _running[lab] = job["id"]
     only = [x for x in body.get("only") or [] if isinstance(x, str)]
     threading.Thread(target=_run, args=(job, lab, targets, p, password, trust, opts, only, changed), daemon=True,
                      name="discover").start()
     audit.record(lab, "discover-start", ranges=[str(r)[:60] for r in body.get("ranges") or []], addresses=len(targets),
-                 ssh=bool(p), crawl=opts["crawl"], subnets=opts["subnets"], tofu=opts["tofu"])
+                 ssh=bool(p), crawl=opts["crawl"], subnets=opts["subnets"], tofu=opts["tofu"] and not password,
+                 allowPublic=allow_public)
     password = None  # noqa: F841
     return job
 
@@ -250,7 +276,7 @@ def _run(job, lab, targets, p, password, trust, opts, only, changed):
                     ids = [h for h in hosts.values() if (22 in h["ports"] or p["port"] in h["ports"])
                            and (h["ip"] in only if only else h["ssh"]["state"] in ("none", "hostkey"))]
                     with ThreadPoolExecutor(max_workers=SSH_WORKERS, thread_name_prefix="identify") as sp:
-                        list(sp.map(lambda h: _identify(h, p, password, trust, opts["tofu"]), ids))
+                        list(sp.map(lambda h: _identify(h, p, password, trust, opts["tofu"], lab), ids))
                     prog["identified"] = sum(1 for h in hosts.values() if h.get("facts"))
                 if opts["crawl"] or opts["subnets"]:
                     queue = _more(hosts, opts, swept)
@@ -272,10 +298,16 @@ def _run(job, lab, targets, p, password, trust, opts, only, changed):
         changed(job)
 
 
-def _identify(h, p, password, trust, tofu):
+def _identify(h, p, password, trust, tofu, lab=""):
+    """Read one host. A password is only sent to a host whose key is known or confirmed by the
+    user: with a password, "trust on first use" is off, so an unknown host (perhaps a fake one
+    in the swept range) is reported for confirmation instead of getting the password."""
     sess = None
+    first_use = tofu and not password
     try:
-        sess = Session.open({**p, "host": h["ip"]}, password, True if tofu else (trust.get(h["ip"]) or None))
+        sess = Session.open({**p, "host": h["ip"]}, password, True if first_use else (trust.get(h["ip"]) or None),
+                            on_trust=lambda host, keytype, fp: audit.record(lab, "hostkey-trusted", host=host, keytype=keytype,
+                                                                            fingerprint=fp, via="discovery" if first_use else "confirmed"))
         drv = drivers.detect(sess)
         facts = drv.collect(sess)
         facts["host"] = h["ip"]

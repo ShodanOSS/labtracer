@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Viewport: links. Cable ends at the real port positions, curves in the topology view,
 // and routes along the floor, walls or a ceiling tray in the room view.
 import * as THREE from 'three';

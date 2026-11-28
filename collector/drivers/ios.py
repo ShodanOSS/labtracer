@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Cisco IOS / IOS-XE driver (also fits many IOS-like CLIs). Read-only.
 
 Runs show commands in an interactive CLI. The running-config is the main source

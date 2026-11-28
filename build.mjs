@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Build app/app.js and app/app.css from src/. The one place the build options live.
 //   node build.mjs           build (npm run build)
 //   node build.mjs --check   rebuild in memory, compare with the committed files, exit 1 if they differ

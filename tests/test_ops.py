@@ -76,6 +76,27 @@ class AuditTest(unittest.TestCase):
         p.write_text("\n".join([lines[0], lines[2]]) + "\n")
         self.assertIn("does not follow", audit.verify("lab")["why"])
 
+    def test_cut_end_and_deleted_log_are_found(self):
+        t = isolate(self)
+        for i in range(4):
+            audit.record("lab", "apply", dev=f"d{i}", ok=True)
+        p = t / "audit" / "lab.jsonl"
+        lines = p.read_text().splitlines()
+        p.write_text("\n".join(lines[:2]) + "\n")  # the chain of the first two is still valid
+        v = audit.verify("lab")
+        self.assertFalse(v["ok"])
+        self.assertIn("3 to 4 were removed", v["why"])
+        p.unlink()
+        self.assertIn("deleted", audit.verify("lab")["why"])
+
+    def test_server_log_is_separate(self):
+        t = isolate(self)
+        audit.record(audit.SERVER, "monitor-config", backend="agent")
+        self.assertTrue((t / "audit" / ".server.jsonl").is_file())
+        self.assertEqual(audit.read(audit.SERVER)[0]["event"], "monitor-config")
+        self.assertEqual(audit.read("server"), [], "a lab named server is a different log")
+        self.assertTrue(audit.verify(audit.SERVER)["ok"])
+
     def test_long_transcripts_are_cut(self):
         isolate(self)
         e = audit.record("lab", "apply", transcript="y" * (audit.MAX_TEXT + 50))
@@ -138,7 +159,7 @@ class FakeOpen:
     def __init__(self, fail_hosts=(), fail_after=None):
         self.calls, self.fail_hosts, self.fail_after = [], set(fail_hosts), fail_after
 
-    def __call__(self, p, password=None, trust=None):
+    def __call__(self, p, password=None, trust=None, on_trust=None):
         self.calls.append(p["host"])
         n = self.calls.count(p["host"])
         if p["host"] in self.fail_hosts and (self.fail_after is None or n > self.fail_after):
@@ -322,6 +343,65 @@ class LinuxPushTest(unittest.TestCase):
         doc = linux.backup(S(), "20260101-000000-abcdef", facts=PVE)
         self.assertEqual(doc["files"], {"/etc/network/interfaces": "auto lo\n"})
         self.assertTrue(doc["onDevice"].endswith(".tgz"))
+
+    @staticmethod
+    def _archive(*members):
+        """A .tgz with (TarInfo kwargs) members; files get a short body."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for m in members:
+                ti = tarfile.TarInfo(m["name"])
+                for k, v in m.items():
+                    if k != "name":
+                        setattr(ti, k, v)
+                body = b"x\n" if ti.type == tarfile.REGTYPE else b""
+                ti.size = len(body)
+                tar.addfile(ti, io.BytesIO(body))
+        return buf.getvalue()
+
+    def test_restore_file_names_from_the_device_are_not_run(self):
+        evil = "/etc/netplan/x' ;reboot; '.yaml"
+        lines = linux._restore_lines({"files": {"/etc/netplan/50-cloud.yaml": "", evil: ""}}, "/var/backups/labtracer/r.tgz")
+        self.assertIn("/etc/netplan/50-cloud.yaml", lines[1])
+        self.assertNotIn("reboot", "".join(lines), "a name that is not a plain netplan file name is left out")
+        lines = linux._restore_lines({"files": {}}, "/tmp/a b.tgz")
+        self.assertIn("tar -xzf '/tmp/a b.tgz'", lines[0])
+        self.assertNotIn("case", lines[1], "no files to keep: every netplan file is removed")
+
+    def test_backup_keeps_only_network_config_files(self):
+        raw = self._archive({"name": "etc/hostname"}, {"name": "etc/shadow"}, {"name": "etc/netplan/../../root/x"})
+        b64 = base64.b64encode(raw).decode()
+
+        class S(FakeExec):
+            def run(self, cmd, timeout=30, stdin=None):
+                return 0, b64, ""
+        self.assertEqual(list(linux.backup(S(), "20260101-000000-abcdef", facts=PVE)["files"]), ["/etc/hostname"])
+
+    def test_unsafe_archives_are_not_restored(self):
+        ok = self._archive({"name": "etc/netplan", "type": tarfile.DIRTYPE}, {"name": "etc/netplan/50.yaml"},
+                           {"name": "etc/hosts"}, {"name": "etc/netplan/link.yaml", "type": tarfile.SYMTYPE, "linkname": "50.yaml"})
+        self.assertIsNone(linux._archive_problem(ok))
+        bad = {
+            "outside": self._archive({"name": "etc/cron.d/x"}),
+            "dotdot": self._archive({"name": "etc/netplan/../../root/.ssh/authorized_keys"}),
+            "abs link": self._archive({"name": "etc/hosts", "type": tarfile.SYMTYPE, "linkname": "/etc/shadow"}),
+            "up link": self._archive({"name": "etc/hosts", "type": tarfile.SYMTYPE, "linkname": "../shadow"}),
+            "hard link": self._archive({"name": "etc/hosts", "type": tarfile.LNKTYPE, "linkname": "etc/shadow"}),
+            "device": self._archive({"name": "etc/hostname", "type": tarfile.CHRTYPE}),
+            "garbage": b"not a tar",
+        }
+        for why, raw in bad.items():
+            with self.subTest(why):
+                self.assertTrue(linux._archive_problem(raw))
+                sess = FakeExec()
+                done, log = linux.restore(sess, {"id": "20260101-000000-abcdef", "archive": base64.b64encode(raw).decode()}, facts=PVE)
+                self.assertFalse(done)
+                self.assertIn("was not restored", log)
+                self.assertEqual(sess.ran, [], "nothing is sent to the device")
+        token, log = linux.arm(FakeExec(), {"id": "20260101-000000-abcdef", "onDevice": "/var/backups/labtracer/a.tgz",
+                                            "archive": base64.b64encode(bad["dotdot"]).decode(), "files": {}}, 5, facts=PVE)
+        self.assertIsNone(token)
+        self.assertIn("No rollback timer", log)
 
     def test_interfaces_editor(self):
         e = linux.Ifaces("auto lo eth0\niface lo inet loopback\n\niface eth0 inet dhcp\n")
@@ -640,6 +720,32 @@ class DiscoverTest(unittest.TestCase):
         for bad in (["10.0.0.0/8"], ["hello"], ["10.0.0.9-10.0.0.1"]):
             with self.subTest(bad), self.assertRaises(ValueError):
                 discover.expand(bad)
+
+    def test_expand_refuses_link_local_reserved_and_public(self):
+        for bad, why in ((["169.254.169.254"], "link-local"), (["169.254.0.0/24"], "link-local"),
+                         (["240.0.0.1"], "reserved"), (["8.8.8.0/30"], "public"), (["10.0.0.1", "1.1.1.1"], "public")):
+            with self.subTest(bad), self.assertRaisesRegex(ValueError, why):
+                discover.expand(bad)
+        self.assertEqual(discover.expand(["8.8.8.8"], allow_public=True), ["8.8.8.8"])
+        with self.assertRaisesRegex(ValueError, "link-local"):
+            discover.expand(["169.254.169.254"], allow_public=True)
+        self.assertEqual(len(discover.expand(["100.64.0.0/30", "172.16.0.1", "192.168.1.1"])), 4, "CGNAT and private are allowed")
+
+    def test_a_password_is_never_sent_on_first_use(self):
+        h = {"ip": "10.0.0.9", "ssh": {"state": "none"}}
+        p = {"host": "0.0.0.0", "port": 22, "user": "admin", "auth": "password", "keyFile": "", "engine": "paramiko", "legacy": False}
+        with mock.patch.object(discover.Session, "open", side_effect=RuntimeError("stop")) as op:
+            discover._identify(h, p, "pw", {}, True, "lab")
+            self.assertIsNone(op.call_args.args[2], "with a password, an unknown host key is not trusted")
+            discover._identify(h, p, "pw", {"10.0.0.9": "SHA256:abc"}, True, "lab")
+            self.assertEqual(op.call_args.args[2], "SHA256:abc", "a fingerprint the user confirmed is used")
+            discover._identify(h, p, None, {}, True, "lab")
+            self.assertIs(op.call_args.args[2], True, "key login: trust on first use as asked")
+
+    def test_runs_are_limited_over_all_labs(self):
+        with mock.patch.dict(discover._running, {"a": "j1", "b": "j2"}), \
+                self.assertRaisesRegex(ValueError, "running already"):
+            discover.start("c", {"ranges": ["10.0.0.1"]}, collector.new_job, collector.changed)
 
     def test_crawl_follows_neighbors_and_arp(self):
         f = json.loads((FIX / "ios-switch.facts.json").read_text())

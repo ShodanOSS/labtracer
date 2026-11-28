@@ -119,6 +119,26 @@ class ServerTest(unittest.TestCase):
     def test_no_path_traversal(self):
         self.assertEqual(self.req("GET", "/api/labs/..%2F..%2Fserver")[0], 404)
 
+    def test_saved_token_is_bound_to_its_address(self):
+        h = {"X-LabTracer": "1", "Content-Type": "application/json"}
+        put = lambda body: self.req("PUT", "/api/monitor/config", body, h)[0]  # noqa: E731
+        self.assertEqual(put({"backend": "agent", "agentUrl": "http://10.0.0.5:8766", "token": "t" * 20}), 200)
+        self.assertEqual(put({"backend": "agent", "agentUrl": "http://10.0.0.5:8766"}), 200, "same address: token kept")
+        self.assertEqual(put({"backend": "agent", "agentUrl": "http://attacker.example:80"}), 400)
+        self.assertEqual(put({"backend": "agent", "agentUrl": "http://10.0.0.5:8766", "insecure": True}), 400)
+        self.assertEqual(put({"backend": "agent", "agentUrl": "http://10.0.0.5:8766", "cafile": "/tmp/evil.pem"}), 400)
+        self.assertEqual(put({"backend": "agent", "agentUrl": "https://10.0.0.6:8766", "token": "u" * 20}), 200, "new token: allowed")
+        # a secret entered for one system is not sent to another one at the same address
+        self.assertEqual(put({"backend": "prometheus", "url": "http://10.0.0.7:9090", "secret": "s"}), 200)
+        self.assertEqual(put({"backend": "zabbix", "url": "http://10.0.0.7:9090"}), 400)
+        self.assertEqual(put({"backend": "agent"}), 200, "an unused secret is not checked")
+        self.assertEqual(put({"backend": "prometheus", "url": "http://10.0.0.7:9090"}), 200, "back where it was entered")
+        st, _, cfg = self.req("GET", "/api/monitor/config")
+        self.assertNotIn("tokenFor", cfg)
+        log = (self.tmp / "data" / "audit" / ".server.jsonl").read_text().splitlines()
+        self.assertTrue(any('"monitor-config"' in line for line in log))
+        self.assertFalse(any("uuuu" in line or "tttt" in line for line in log), "no secret in the audit log")
+
     # ---- save conflicts between two windows
     def test_save_conflict(self):
         name = "conflict-test"

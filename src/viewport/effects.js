@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Viewport: live status rings and labels, the ping packet animation, failure flashes.
 import * as THREE from 'three';
 import { devById } from '../model.js';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Drift: the lab model is the plan; facts read from the device (collector/ in server.py)
 // are the actual state. compareDevice() lists every difference as an item. An item can
 // have an `accept` action that changes the model to match the device ("accept actual").

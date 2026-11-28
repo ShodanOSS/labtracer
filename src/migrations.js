@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Format versions of the files LabTracer writes, and the steps that bring an older file up
 // to the current format. No DOM: tests/migrations.test.mjs runs it in Node.
 //

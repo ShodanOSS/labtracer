@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The normalized facts document. Every driver fills this shape; src/drift.js reads it.
 
 { collected, driver, ok, errors[],

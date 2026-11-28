@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector: properties of the selected link (cable), and moving either end.
 import { h, ap } from '../util.js';
 import { MEDIA } from '../templates.js';

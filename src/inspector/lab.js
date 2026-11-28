@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector: the lab panel shown when nothing is selected. Rooms, cable routing,
 // monitoring agent, drift, unplaced devices and the address plan.
 import { h, ap, uid, intToIp } from '../util.js';

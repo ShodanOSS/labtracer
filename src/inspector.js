@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Right panel: properties for the selected device, link, or the lab.
 import { h, ap, clear, mixin } from './util.js';
 import { devById, linkById } from './model.js';

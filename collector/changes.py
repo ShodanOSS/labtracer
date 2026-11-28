@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Staged change sets: data/changes/<lab>/<id>.json.
 
 A change set collects pushes for many devices before anything runs. Each item is one

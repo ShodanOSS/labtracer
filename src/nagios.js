@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Nagios object config generated from the lab (Nagios Core 4, Naemon, Icinga 1).
 //
 // One host per deployed device that has monitoring on (the same devices and checks the

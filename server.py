@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """LabTracer local server.
 
 Standard library only. Serves the web UI from ./app and stores labs,
@@ -190,6 +191,22 @@ def monitor_targets(targets):
     return {"ok": True, "targets": len(_targets)}
 
 
+def _bind_old(c, backend):
+    """Where a token or secret saved before tokenFor/secretFor existed was meant for: the settings saved with it."""
+    if backend == "agent":
+        return {"url": c.get("agentUrl", ""), "cafile": c.get("cafile", ""), "insecure": bool(c.get("insecure"))}
+    return {"backend": backend or "", "url": c.get("url", ""), "cafile": c.get("cafile", ""), "insecure": bool(c.get("insecure"))}
+
+
+def moved_from(bound, now):
+    """True when a saved token or secret would go somewhere else than where it was entered:
+    another address, monitoring system or CA file, or with certificate checks newly turned off.
+    Turning certificate checks back on is not a move."""
+    if any(str(bound.get(k, "")) != str(now.get(k, "")) for k in ("url", "backend", "cafile") if k in now):
+        return True
+    return bool(now.get("insecure")) and not bound.get("insecure")
+
+
 def agent_call(method, path, body=None, timeout=6):
     cfg = monitor_cfg()
     url = (cfg.get("agentUrl") or "").rstrip("/")
@@ -280,7 +297,8 @@ class EventHub:
 
 hub = EventHub()
 collector.listeners.append(hub.broadcast)
-guac.audit_hook = audit.record
+# sessions opened without a lab (lab "") go to the server-wide audit log
+guac.audit_hook = ssh_bridge.audit_hook = lambda lab, event, **f: audit.record(lab or audit.SERVER, event, **f)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -290,6 +308,11 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(APP_DIR), **kwargs)
 
     # quieter log: one line per API call, nothing for static files
+    def list_directory(self, path):
+        """No folder listings of app/: only the files the app loads are served."""
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        return None
+
     def log_message(self, fmt, *args):
         if getattr(self, "path", "").startswith("/api/"):
             sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
@@ -339,7 +362,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._error(HTTPStatus.FORBIDDEN, "bad host")
         path = urlparse(self.path).path
         if path == "/api/ping":
-            return self._json({"ok": True, "app": "labtracer", "data": str(DATA_DIR)})
+            # the data folder is shown to the local user; not told to other computers
+            return self._json({"ok": True, "app": "labtracer", "data": str(DATA_DIR) if ssh_bridge.ENABLED else ""})
         if path == "/api/labs":
             labs = []
             for f in sorted(LAB_DIR.glob("*.json")):
@@ -407,12 +431,18 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     # ---- changes, audit, backups, discovery, remote access -----------
+    OPS_WRITE = ("changes", "backups", "discover", "remote")
+
     def _ops_api(self, method, path, data):
         """The operations API. Returns True when it answered the request."""
         parts = [unquote(x) for x in path[len("/api/"):].split("/")]
         head, n = parts[0], len(parts)
         q = parse_qs(urlparse(self.path).query)
         try:
+            if method != "GET" and head in self.OPS_WRITE and not ssh_bridge.ENABLED:
+                # on a network address every operation that changes something here is off,
+                # not only the ones that log in to a device (no authentication yet)
+                raise PermissionError(f"{head}: off because server.py listens on a network address")
             if head == "changes" and n >= 2:
                 lab = safe_name(parts[1])
                 if method == "GET" and n == 2:
@@ -464,7 +494,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts[1] == "config":
                     return self._json(guac.config()) or True
                 if method == "PUT" and parts[1] == "config":
-                    return self._json(guac.save_config(data)) or True
+                    saved = guac.save_config(data)
+                    audit.record(audit.SERVER, "remote-config", **{k: v for k, v in (saved if isinstance(saved, dict) else {}).items()
+                                                                   if k in ("guacd", "tls", "insecure", "cafile")})
+                    return self._json(saved) or True
                 if method == "POST" and parts[1] == "test":
                     return self._json(guac.test()) or True
                 if method == "POST" and parts[1] == "session":
@@ -611,19 +644,42 @@ class Handler(SimpleHTTPRequestHandler):
             for u in (url, burl):
                 if u and not u.startswith(("http://", "https://")):
                     return self._error(HTTPStatus.BAD_REQUEST, "the URL must start with http:// or https://")
+            cafile = str(data.get("cafile", c.get("cafile", ""))).strip()
+            insecure = bool(data.get("insecure", c.get("insecure", False)))
+            new_token = "token" in data and data["token"] is not None
+            new_secret = "secret" in data and data["secret"] is not None
+            # A saved token or secret is bound to where it was entered (tokenFor / secretFor), so
+            # changing the address or the certificate check can not send it to another host: the
+            # token must be entered again. Checked only when it would be used.
+            token_for = {"url": url, "cafile": cafile, "insecure": insecure}
+            secret_for = {"backend": backend, "url": burl, "cafile": cafile, "insecure": insecure}
+            if c.get("token") and not new_token and backend == "agent" and moved_from(c.get("tokenFor") or _bind_old(c, "agent"), token_for):
+                return self._error(HTTPStatus.BAD_REQUEST, "enter the agent token again for the new address or certificate settings")
+            if c.get("secret") and not new_secret and backend != "agent" and moved_from(c.get("secretFor") or _bind_old(c, c.get("backend")), secret_for):
+                return self._error(HTTPStatus.BAD_REQUEST, "enter the secret again for the new address, monitoring system or certificate settings")
+            changed_keys = sorted(k for k, v in (("backend", backend), ("agentUrl", url), ("url", burl), ("cafile", cafile),
+                                                 ("insecure", insecure)) if v != c.get(k, "agent" if k == "backend" else ("" if k != "insecure" else False)))
+            if c.get("token") and "tokenFor" not in c:
+                c["tokenFor"] = _bind_old(c, "agent")
+            if c.get("secret") and "secretFor" not in c:
+                c["secretFor"] = _bind_old(c, c.get("backend"))
             c.update(backend=backend, agentUrl=url, url=burl, user=str(data.get("user", c.get("user", ""))).strip()[:120])
-            if "token" in data and data["token"] is not None:
+            if new_token:
                 c["token"] = str(data["token"]).strip()
-            if "secret" in data and data["secret"] is not None:
+                c["tokenFor"] = token_for
+            if new_secret:
                 c["secret"] = str(data["secret"]).strip()
-            c["cafile"] = str(data.get("cafile", c.get("cafile", ""))).strip()
-            c["insecure"] = bool(data.get("insecure", c.get("insecure", False)))
+                c["secretFor"] = secret_for
+            c["cafile"] = cafile
+            c["insecure"] = insecure
             with _lock:
                 atomic_write(MONITOR_FILE, json.dumps(c, indent=1).encode("utf-8"))
                 try:
                     os.chmod(MONITOR_FILE, 0o600)
                 except OSError:
                     pass
+            audit.record(audit.SERVER, "monitor-config", backend=backend, agentUrl=url, url=burl, insecure=insecure,
+                         changed=changed_keys, tokenChanged=new_token, secretChanged=new_secret)
             return self._json({"ok": True})
         if self._ops_api("PUT", path, data):
             return None

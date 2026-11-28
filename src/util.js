@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Small shared helpers: DOM building, ids, IP math.
 
 export function uid(prefix = 'id') {

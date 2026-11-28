@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector: the Nagios section of the lab panel. Export the Nagios config generated from
 // the lab (src/nagios.js), and compare it with what Nagios monitors (agent source "nagios").
 import { h, download, safeName } from '../util.js';

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Local 3D homelab modeller: topology, room view, device configs, network simulation",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "test": "node --test tests/build.test.mjs tests/history.test.mjs tests/inventory.test.mjs tests/migrations.test.mjs tests/drift.test.mjs tests/nagios.test.mjs tests/discover.test.mjs",

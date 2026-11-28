@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Collector: read the actual state of devices over SSH for the drift report, and push
 reviewed changes back (remediation), with backups, rollback timers and an audit log.
 
@@ -96,6 +97,12 @@ def _params(d):
     return ssh_bridge.validate({**d, "engine": "paramiko"}), driver
 
 
+def _on_trust(lab, dev, via):
+    """Audit callback for Session.open: a host key confirmed by the user was saved."""
+    return lambda host, keytype, fp: audit.record(lab, "hostkey-trusted", dev=dev, host=host, keytype=keytype,
+                                                  fingerprint=fp, via=via)
+
+
 # ---------------------------------------------------------------- collect
 def start(lab, body):
     """Start a collect job. body: {devices:[{id, name, host, port, user, auth, keyFile, legacy, driver}],
@@ -141,13 +148,25 @@ def collect_with(job, dev_id, sess, driver):
     return facts
 
 
+def _audit_collect_end(job):
+    """One audit entry per collect run, written by the device that finishes last
+    (scheduled collects run every few minutes: one entry per device would flood the log)."""
+    with _lock:
+        if job.get("audited") or any(d.get("state") in ("queued", "running") for d in job["devices"].values()):
+            return
+        job["audited"] = True
+        devs = {k: {"state": d.get("state"), "host": d.get("host"), **({"error": d["error"][:200]} if d.get("error") else {})}
+                for k, d in job["devices"].items()}
+    audit.record(job["lab"], "collect", job=job["id"], devices=devs)
+
+
 def _collect_one(job, dev_id, p, driver, password, trust):
     item = job["devices"][dev_id]
     item["state"] = "running"
     changed(job)
     sess = None
     try:
-        sess = Session.open(p, password, trust or None)
+        sess = Session.open(p, password, trust or None, on_trust=_on_trust(job["lab"], dev_id, "collect"))
         password = None
         facts = collect_with(job, dev_id, sess, driver)
         item.update(state="done", collected=facts["collected"], errors=facts["errors"])
@@ -159,6 +178,7 @@ def _collect_one(job, dev_id, p, driver, password, trust):
         password = None
         if sess:
             sess.close()
+        _audit_collect_end(job)
         changed(job)
 
 
@@ -248,10 +268,10 @@ def apply(body):
     job["devices"][pl["dev"]] = {"state": "queued", "name": pl["name"], "host": p["host"], "driver": pl["driver"]}
     opts = _opts(body)
 
-    def run():
-        push(job, pl, password, str(body.get("trust") or ""), opts)
+    def run(pw):  # the password is an argument: a closure would see the None set below
+        push(job, pl, pw, str(body.get("trust") or ""), opts)
         changed(job)
-    _pool.submit(run)
+    _pool.submit(run, password)
     password = None  # noqa: F841
     return snapshot(job["id"])
 
@@ -281,7 +301,7 @@ def push(job, it, password, trust, opts, change_id=None):
         changed(job)
 
     try:
-        sess = Session.open(it["params"], password, trust or None)
+        sess = Session.open(it["params"], password, trust or None, on_trust=_on_trust(lab, dev, "push"))
         backup_doc = None
         if hasattr(drv, "backup"):
             phase("backup")
@@ -397,7 +417,7 @@ def change_apply(lab, change_id, body):
     audit.record(lab, "change-apply", change=doc["id"], title=doc["title"], devices=[it["dev"] for it in doc["items"]],
                  digest=doc["digest"], options=opts)
 
-    def run():
+    def run(password):  # an argument, not the closure: the caller drops its reference below
         results, failed = {}, False
         for it in doc["items"]:
             item = job["devices"][it["dev"]]
@@ -418,7 +438,7 @@ def change_apply(lab, change_id, body):
         finally:
             job["busy"] = False
             changed(job)
-    _pool.submit(run)
+    _pool.submit(run, password)
     password = None  # noqa: F841
     return snapshot(job["id"])
 
@@ -438,6 +458,11 @@ def restore(lab, body):
     if not hasattr(drv, "restore"):
         raise ValueError(f"the {doc['driver']} driver can not restore a backup: open it and paste what you need in the console")
     p = ssh_bridge.validate({**d, "engine": "paramiko"})
+    if doc.get("host") and p["host"].lower() != str(doc["host"]).lower():
+        audit.record(lab, "restore-refused", dev=dev, backup=doc["id"], host=p["host"], backupHost=doc["host"],
+                     reason="the target is not the host the backup was taken from")
+        raise ValueError(f"backup {doc['id']} was taken from {doc['host']}, not {p['host']}. "
+                         "A backup is only restored to the host it came from.")
     password = body.get("password") if isinstance(body.get("password"), str) and p["auth"] == "password" else None
     job = new_job(lab, "restore")
     job["devices"][dev] = {"state": "queued", "name": str(d.get("name") or dev)[:80], "host": p["host"], "driver": doc["driver"]}
@@ -450,7 +475,7 @@ def restore(lab, body):
         sess = None
         ctx = {"dev": dev, "name": item["name"], "host": p["host"], "driver": doc["driver"], "backup": doc["id"]}
         try:
-            sess = Session.open(p, password, trust or None)
+            sess = Session.open(p, password, trust or None, on_trust=_on_trust(lab, dev, "restore"))
             facts = (store.read(lab, dev) or {}).get("facts")
             ok, text = drivers.call(drv.restore, sess, doc, facts=facts)
             item.update(transcript=text, applied=ok)

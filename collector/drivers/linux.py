@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Linux driver: servers, Proxmox VE, Raspberry Pi, and BusyBox systems such as DD-WRT.
 
 Read-only. One exec call runs a POSIX sh script; each part prints a '@@name' marker
@@ -5,6 +6,7 @@ so a missing tool only empties its own part. JSON output (ip -j, lldpctl -f json
 pvesh) is used when present, with text fallbacks for BusyBox and old iproute2.
 """
 
+import base64
 import json
 import re
 
@@ -739,17 +741,71 @@ def backup(sess, backup_id, facts=None):
     if raw:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
             for m in tar.getmembers():
-                if m.isfile() and m.size <= 1024 * 1024:
-                    files["/" + m.name.lstrip("/")] = tar.extractfile(m).read().decode("utf-8", "replace")
+                if m.isfile() and m.size <= 1024 * 1024 and _backed_up_path(m.name):
+                    files["/" + _member_path(m.name)] = tar.extractfile(m).read().decode("utf-8", "replace")
     config = "\n".join(f"### {p}\n{t.rstrip()}\n" for p, t in sorted(files.items()))
     return {"config": config, "files": files, "archive": base64.b64encode(raw).decode() if raw else "", "onDevice": on_dev}
 
 
+NETPLAN_FILE_RE = re.compile(r"^/etc/netplan/[A-Za-z0-9._-]+\.ya?ml$")
+
+
+def _member_path(name):
+    """A tar member name as a path relative to /, without "./" or a leading "/"."""
+    name = str(name).replace("\\", "/")
+    while name.startswith(("./", "/")):
+        name = name[2:] if name.startswith("./") else name[1:]
+    return name.rstrip("/")
+
+
+def _backed_up_path(name):
+    """True when a member name is one of BACKUP_PATHS or inside one, with no ".." part."""
+    rel = _member_path(name)
+    if not rel or ".." in rel.split("/"):
+        return False
+    return any(rel == b or rel.startswith(b + "/") for b in BACKUP_PATHS)
+
+
+def _archive_problem(raw):
+    """Why a backup archive must not be unpacked as root on a device, or None when it is safe.
+    The archive comes from the device, or from data/backups: both can be changed by someone else."""
+    import io
+    import tarfile
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+            for m in tar.getmembers():
+                if not _backed_up_path(m.name):
+                    if _member_path(m.name) in ("", "etc", "etc/network", "etc/NetworkManager"):
+                        if m.isdir():
+                            continue
+                    return f"the archive has a file outside the network config folders: {str(m.name)[:80]}"
+                if m.isfile() or m.isdir():
+                    continue
+                if m.issym():
+                    target = str(m.linkname)
+                    if target.startswith("/") or ".." in target.replace("\\", "/").split("/"):
+                        return f"the archive has a link that points outside its folder: {str(m.name)[:80]}"
+                    continue
+                if m.islnk():
+                    if not _backed_up_path(m.linkname):
+                        return f"the archive has a hard link to a file outside the network config folders: {str(m.name)[:80]}"
+                    continue
+                return f"the archive has a device file or pipe: {str(m.name)[:80]}"
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        return f"the archive can not be read ({exc})"
+    return None
+
+
 def _restore_lines(backup_doc, archive):
-    """Shell lines that put the backed-up files back. netplan files added since are removed."""
-    keep = " ".join(p for p in sorted(backup_doc.get("files") or {}) if p.startswith("/etc/netplan/"))
-    return [f"cd / && tar -xzf {archive}",
-            f"for f in /etc/netplan/*.yaml; do case ' {keep} ' in *\" $f \"*) ;; *) [ -f \"$f\" ] && rm -f \"$f\";; esac; done; true"]
+    """Shell lines that put the backed-up files back. netplan files added since are removed.
+    The file names come from the device: only plain netplan names are used, each quoted."""
+    keep = sorted(p for p in (backup_doc.get("files") or {}) if NETPLAN_FILE_RE.match(p))
+    if keep:
+        prune = (f"for f in /etc/netplan/*.yaml; do case \"$f\" in {'|'.join(_q(p) for p in keep)}) ;; "
+                 "*) [ -f \"$f\" ] && rm -f \"$f\";; esac; done; true")
+    else:
+        prune = "for f in /etc/netplan/*.yaml; do [ -f \"$f\" ] && rm -f \"$f\"; done; true"
+    return [f"cd / && tar -xzf {_q(archive)}", prune]
 
 
 RELOAD = ["command -v ifreload >/dev/null 2>&1 && ifreload -a; true",
@@ -765,6 +821,10 @@ def arm(sess, backup_doc, minutes, extra=None, facts=None):
         return None, "# No systemd-run on this device: no rollback timer."
     if not backup_doc.get("onDevice"):
         return None, "# The backup could not be kept on the device (root needed): no rollback timer."
+    if backup_doc.get("archive"):
+        problem = _archive_problem(base64.b64decode(backup_doc["archive"]))
+        if problem:
+            return None, f"# No rollback timer: {problem}."
     P = _sudo(plat)
     log = []
     unit = "labtracer-rollback-" + backup_doc["id"]
@@ -826,10 +886,17 @@ def restore(sess, backup_doc, facts=None):
     log = []
     if not backup_doc.get("archive"):
         return False, "This backup has no files to restore."
+    try:
+        raw = base64.b64decode(backup_doc["archive"], validate=True)
+    except ValueError:
+        return False, "This backup is damaged: its archive is not valid base64. Nothing was changed."
+    problem = _archive_problem(raw)
+    if problem:
+        return False, f"This backup was not restored: {problem}. Nothing was changed."
     if not _need_root(sess, P, log):
         return False, "\n".join(log)
     tmp = f"{DEVICE_BACKUPS}/restore-{backup_doc['id']}.tgz"
-    st, _ = _run(sess, f"{P}sh -c {_q(f'mkdir -p {DEVICE_BACKUPS} && cat > {tmp}')}", log, stdin=base64.b64decode(backup_doc["archive"]))
+    st, _ = _run(sess, f"{P}sh -c {_q(f'mkdir -p {DEVICE_BACKUPS} && cat > {tmp}')}", log, stdin=raw)
     for line in ([] if st else _restore_lines(backup_doc, tmp)):
         st, _ = _run(sess, f"{P}sh -c {_q(line)}", log)
         if st != 0:

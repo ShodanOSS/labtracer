@@ -1,4 +1,5 @@
 @echo off
+REM SPDX-License-Identifier: Apache-2.0
 rem Start LabTracer. Needs Python 3.8 or later (python.org or the Microsoft Store).
 cd /d "%~dp0"
 where py >nul 2>nul && (py -3 server.py %* & goto :eof)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Inspector, Console tab: the simulated IOS-style console and the SSH console form.
 import { h, ap } from '../util.js';
 import { monitorHost } from '../monitor.js';

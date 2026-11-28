@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """MikroTik RouterOS driver (v6 and v7): collect, push, backup, rollback timer, restore.
 
 RouterOS answers SSH exec commands, so each read is one exec call ("print terse": one item

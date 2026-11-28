@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Viewport: the scene around the devices. Topology grid, room floor, walls and room label.
 import * as THREE from 'three';
 import { esc } from '../util.js';

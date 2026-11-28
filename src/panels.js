@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Side panels: the device library (left) and the properties panel (right).
 // The splitter between a panel and the view: drag to resize, click to hide or show.
 // Keys: [ and ] toggle the panels. A focused splitter: Enter or Space toggles, arrows resize.

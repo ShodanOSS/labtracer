@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Example lab shown on first start. All names and addresses are generic
 // placeholders (private RFC 1918 ranges). Replace them with your own.
 import { BUILTIN } from './templates.js';

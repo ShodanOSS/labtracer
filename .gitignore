@@ -9,6 +9,11 @@
 !/.gitattributes
 !/build.mjs
 !/README.md
+!/LICENSE
+!/NOTICE
+!/THIRD_PARTY_NOTICES.md
+!/SECURITY.md
+!/docs/
 !/package.json
 !/package-lock.json
 !/server.py

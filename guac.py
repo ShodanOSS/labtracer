@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Remote access over Apache Guacamole: RDP, VNC, SSH and Telnet in the browser.
 
     browser (guacamole-common-js) <-- WebSocket "guacamole" --> server.py (this module)
@@ -269,9 +270,9 @@ def take_session(sid):
 
 
 def _audit(p, event, **kw):
-    if audit_hook and p.get("lab"):
+    if audit_hook:
         try:
-            audit_hook(p["lab"], event, dev=p["device"] or None, name=p["name"] or None, host=p["host"], protocol=p["protocol"],
+            audit_hook(p.get("lab") or "", event, dev=p["device"] or None, name=p["name"] or None, host=p["host"], protocol=p["protocol"],
                        login=p["user"] or None, **kw)  # "user" in the audit log is who ran LabTracer
         except Exception:  # noqa: BLE001
             pass
