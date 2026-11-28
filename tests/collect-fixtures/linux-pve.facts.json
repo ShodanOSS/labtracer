@@ -207,5 +207,6 @@
   "hostnamectl": true,
   "interfacesFile": "auto lo\niface lo inet loopback\n\niface eno1 inet manual\n\niface eno2 inet manual\n\nauto vmbr0\niface vmbr0 inet static\n\taddress 192.168.20.11/24\n\tgateway 192.168.20.1\n\tbridge-ports eno1\n\tbridge-stp off\n\tbridge-fd 0\n\nsource /etc/network/interfaces.d/*\n"
  },
- "rawConfig": ""
+ "rawConfig": "",
+ "descriptions": true
 }

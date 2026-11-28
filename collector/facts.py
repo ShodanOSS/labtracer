@@ -29,6 +29,7 @@ def new_facts(driver):
         "system": {"hostname": "", "vendor": "", "model": "", "serial": "", "os": "", "osVersion": ""},
         "interfaces": [], "routes": [], "vlans": None, "neighbors": None, "listening": None, "guests": None,
         "arp": None, "macTable": None, "platform": {}, "rawConfig": "",
+        "descriptions": False,  # True when the driver read the interface descriptions (an empty desc then means "none")
     }
 
 

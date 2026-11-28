@@ -120,6 +120,22 @@ DEV2 = {**DEV, "id": "dev_2", "name": "sw2", "host": "192.0.2.11"}
 OPS = [{"op": "sw-access", "port": "Gi0/3", "vlan": 20}]
 
 
+class JobTest(unittest.TestCase):
+    def test_a_running_job_is_not_dropped(self):
+        old = collector.new_job("lab", "change")
+        old["devices"]["d"] = {"state": "running"}
+        old["created"] -= collector.JOB_TTL + 60
+        collector.new_job("lab", "collect")
+        self.assertIsNotNone(collector.snapshot(old["id"]), "still running after an hour: kept")
+        old["done"] = True
+        collector.new_job("lab", "collect")
+        self.assertIsNone(collector.snapshot(old["id"]), "finished and old: dropped")
+        stuck = collector.new_job("lab", "change")
+        stuck["created"] -= collector.JOB_MAX_AGE + 60
+        collector.new_job("lab", "collect")
+        self.assertIsNone(collector.snapshot(stuck["id"]), "a job that never finished goes after a day")
+
+
 class ChangeSetTest(unittest.TestCase):
     def setUp(self):
         isolate(self)
@@ -146,6 +162,89 @@ class ChangeSetTest(unittest.TestCase):
         events = [e["event"] for e in audit.read("lab")]
         for ev in ("change-created", "change-staged", "change-edited", "change-discarded"):
             self.assertIn(ev, events)
+
+    ROUTE = [{"op": "route-del", "dest": "0.0.0.0/0", "via": "192.0.2.254"}, {"op": "route-add", "dest": "0.0.0.0/0", "via": "192.0.2.1"}]
+
+    def _params(self):
+        """validate() without paramiko: the params a device would have."""
+        return mock.patch.object(collector.ssh_bridge, "validate",
+                                 side_effect=lambda p: {**p, "port": int(p.get("port") or 22), "engine": "paramiko", "keyFile": "", "legacy": False})
+
+    def test_removing_a_change_removes_all_of_its_operations(self):
+        """One drift item can need two operations (a route change): "remove" takes the whole change."""
+        with self._params():
+            doc = changes.create("lab", {})
+            doc = changes.add("lab", doc["id"], {"items": [{"device": DEV, "groups": [
+                {"label": "Route via 192.0.2.1", "ops": self.ROUTE}, {"label": "Set VLAN 20", "ops": OPS}]}]})
+            it = doc["items"][0]
+            self.assertEqual(it["labels"], ["Route via 192.0.2.1", "Set VLAN 20"])
+            self.assertEqual([o["op"] for o in it["ops"]], ["route-del", "route-add", "sw-access"])
+            doc = changes.edit("lab", doc["id"], {"dropOp": ["dev_1", 1]})  # "Set VLAN 20"
+            it = doc["items"][0]
+            self.assertEqual(it["labels"], ["Route via 192.0.2.1"])
+            self.assertEqual([o["op"] for o in it["ops"]], ["route-del", "route-add"], "the route change stays whole")
+            self.assertFalse(any("vlan 20" in c for c in it["commands"]))
+            self.assertTrue(any(c.startswith("ip route 0.0.0.0") for c in it["commands"]), "the new route is still added")
+            doc = changes.edit("lab", doc["id"], {"dropOp": ["dev_1", 0]})
+            self.assertEqual(doc["items"], [], "both route operations went with their change")
+        self.assertIn('removed "Route via 192.0.2.1" from dev_1', [w for e in audit.read("lab") for w in e.get("what") or []])
+
+    def test_same_change_staged_twice_is_kept_once(self):
+        with self._params():
+            doc = changes.create("lab", {})
+            for _ in range(2):
+                doc = changes.add("lab", doc["id"], {"items": [{"device": DEV, "groups": [{"label": "Route via 192.0.2.1", "ops": self.ROUTE}]}]})
+            self.assertEqual(doc["items"][0]["labels"], ["Route via 192.0.2.1"])
+
+    def test_a_set_staged_by_an_older_page_keeps_its_changes_whole(self):
+        with self._params():
+            doc = changes.create("lab", {})
+            # ops and labels whose counts differ (one label for two operations): one change
+            doc = changes.add("lab", doc["id"], {"items": [{"device": DEV, "ops": self.ROUTE + OPS, "labels": ["Route via 192.0.2.1", "Set VLAN 20"]}]})
+            self.assertEqual(len(doc["items"][0]["labels"]), 1)
+            doc = changes.edit("lab", doc["id"], {"dropOp": ["dev_1", 0]})
+            self.assertEqual(doc["items"], [])
+            # an item stored before groups existed (labels and ops one to one)
+            doc = changes.create("lab", {})
+            doc = changes.add("lab", doc["id"], {"items": [{"device": DEV, "ops": OPS + [{"op": "iface-desc", "port": "Gi0/3", "desc": "x"}], "labels": ["a", "b"]}]})
+            raw = changes.get("lab", doc["id"])
+            for it in raw["items"]:
+                it.pop("groups")
+            changes._write("lab", raw)
+            doc = changes.edit("lab", doc["id"], {"dropOp": ["dev_1", 0]})
+            self.assertEqual([o["op"] for o in doc["items"][0]["ops"]], ["iface-desc"])
+
+    def test_digest_covers_the_target(self):
+        with self._params():
+            doc = changes.create("lab", {})
+            doc = changes.add("lab", doc["id"], {"items": [{"device": DEV, "groups": [{"label": "VLAN", "ops": OPS}]}]})
+            reviewed = doc["digest"]
+            self.assertEqual(doc["items"][0]["target"], {"host": "192.0.2.10", "port": 22, "user": "admin"}, "the review shows where it goes")
+            # the same change staged again for the device, now with another host: same commands
+            doc = changes.add("lab", doc["id"], {"items": [{"device": {**DEV, "host": "198.51.100.9"}, "groups": [{"label": "VLAN", "ops": OPS}]}]})
+            self.assertNotEqual(doc["digest"], reviewed)
+            with self.assertRaisesRegex(ValueError, "changed since you reviewed"):
+                collector.change_apply("lab", doc["id"], {"digest": reviewed})
+
+    def test_a_set_left_applying_becomes_interrupted(self):
+        with self._params():
+            doc = changes.create("lab", {})
+            doc = changes.add("lab", doc["id"], {"items": [{"device": DEV, "groups": [{"label": "VLAN", "ops": OPS}]}]})
+        changes.begin_apply("lab", doc["id"], doc["digest"])
+        self.assertEqual(changes.get("lab", doc["id"])["status"], "applying", "still running in this process")
+        changes._active.clear()  # as after a restart of server.py
+        self.assertEqual(changes.list_for("lab")[0]["status"], "interrupted")
+        self.assertEqual(changes.get("lab", doc["id"])["status"], "interrupted")
+        self.assertEqual([e["event"] for e in audit.read("lab")].count("change-interrupted"), 1, "logged once")
+
+    def test_an_apply_that_can_not_start_leaves_a_draft(self):
+        with self._params():
+            doc = changes.create("lab", {})
+            doc = changes.add("lab", doc["id"], {"items": [{"device": DEV, "groups": [{"label": "VLAN", "ops": OPS}]}]})
+        with mock.patch.object(collector._pool, "submit", side_effect=RuntimeError("pool is shut down")), \
+                self.assertRaises(RuntimeError):
+            collector.change_apply("lab", doc["id"], {"digest": doc["digest"]})
+        self.assertEqual(changes.get("lab", doc["id"])["status"], "draft")
 
     def test_bad_ops_are_refused_when_staged(self):
         doc = changes.create("lab", {})
@@ -633,6 +732,40 @@ class GuacTest(unittest.TestCase):
         self.assertNotIn("file", got[2], "a file upload from the browser is refused")
         self.assertTrue(ws.closed)
         self.assertEqual(p["password"], "", "the password is dropped after the connect")
+
+    def test_an_instruction_that_never_ends_closes_the_session(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        got = []
+        t = threading.Thread(target=self.fake_guacd, args=(srv, got), daemon=True)
+        t.start()
+        chunk = "9999999.".encode() + b"x" * 60000  # a length prefix with no end, sent again and again
+
+        class WS:
+            def __init__(self):
+                self.out, self.closed, self.n = [], False, 0
+
+            def send_text(self, s):
+                self.out.append(s)
+
+            def recv(self):
+                self.n += 1
+                if self.closed or self.n > 100:
+                    return None, None
+                return 0x1, chunk if self.n == 1 else b"x" * 60000
+
+            def close(self, code=1000):
+                self.closed = True
+        ws = WS()
+        p = guac.validate({"protocol": "rdp", "host": "192.0.2.9", "user": "u", "password": "x"})
+        with mock.patch.object(guac, "config", return_value={"guacd": f"127.0.0.1:{srv.getsockname()[1]}", "tls": False, "cafile": "", "insecure": False}):
+            guac.run(ws, p)
+        t.join(3)
+        srv.close()
+        self.assertTrue(ws.closed)
+        self.assertLess(ws.n, 100, "closed when the buffer passed the limit, not when the browser stopped")
+        self.assertLessEqual((ws.n - 1) * 60000, guac.MAX_PENDING + 60000)
 
 
 # ---------------------------------------------------------------- monitoring backends

@@ -206,5 +206,6 @@
   }
  ],
  "platform": {},
- "rawConfig": "!\n!\nversion 15.2\nhostname rack-switch\n!\nvlan 10\n name mgmt\n!\ninterface GigabitEthernet0/1\n description uplink spare\n shutdown\n!\ninterface GigabitEthernet0/2\n description srv-01 eno1\n switchport access vlan 20\n switchport mode access\n!\ninterface GigabitEthernet0/3\n switchport access vlan 30\n switchport mode access\n!\ninterface GigabitEthernet0/48\n description to edge-router lan3\n switchport trunk native vlan 1\n switchport trunk allowed vlan 1,10,20,30\n switchport trunk allowed vlan add 40\n switchport mode trunk\n!\ninterface Vlan1\n no ip address\n shutdown\n!\ninterface Vlan10\n ip address 192.168.10.2 255.255.255.0\n!\nip default-gateway 192.168.10.1\nip route 10.0.0.0 255.0.0.0 192.168.10.254\n!\nend\n"
+ "rawConfig": "!\n!\nversion 15.2\nhostname rack-switch\n!\nvlan 10\n name mgmt\n!\ninterface GigabitEthernet0/1\n description uplink spare\n shutdown\n!\ninterface GigabitEthernet0/2\n description srv-01 eno1\n switchport access vlan 20\n switchport mode access\n!\ninterface GigabitEthernet0/3\n switchport access vlan 30\n switchport mode access\n!\ninterface GigabitEthernet0/48\n description to edge-router lan3\n switchport trunk native vlan 1\n switchport trunk allowed vlan 1,10,20,30\n switchport trunk allowed vlan add 40\n switchport mode trunk\n!\ninterface Vlan1\n no ip address\n shutdown\n!\ninterface Vlan10\n ip address 192.168.10.2 255.255.255.0\n!\nip default-gateway 192.168.10.1\nip route 10.0.0.0 255.0.0.0 192.168.10.254\n!\nend\n",
+ "descriptions": true
 }

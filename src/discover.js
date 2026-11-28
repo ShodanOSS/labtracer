@@ -314,8 +314,9 @@ export class Discovery {
     Object.assign(map, res.map);
     app.commit(`Discovery: add ${res.added} device(s)`, 'all');
     try {
-      await fetch(`${this.base()}/adopt`, { method: 'POST', headers: HDR, body: JSON.stringify({ map }) });
-    } catch { /* drift facts come with the next collect */ }
+      const r = await fetch(`${this.base()}/adopt`, { method: 'POST', headers: HDR, body: JSON.stringify({ map }) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    } catch (e) { toast(`The devices were added, but their facts were not kept (${e.message}): run Collect to see their drift.`, 'warn', 8000); }
     await app.collect.load();
     app.viewport.fit();
     toast(`Added ${res.added} device(s) and ${res.links} cable(s)${res.unmanaged ? `, ${res.unmanaged} assumed unmanaged switch(es)` : ''}`, 'ok', 6000);

@@ -131,3 +131,15 @@ test('warranty state', () => {
   assert.equal(warrantyState({ inv: { warranty: '2027-06-01' } }, now), 'ok');
   assert.equal(warrantyState({ inv: { warranty: '' } }, now), '');
 });
+
+test('cells that a spreadsheet would run as formulas are exported as text and import back unchanged', async () => {
+  const { csvCell } = await import('../src/inventory.js');
+  for (const v of ['=HYPERLINK("http://x","y")', '+1+1', '-2+3', '@SUM(A1)', '\tx']) {
+    const cell = csvCell(v);
+    assert.ok(cell.startsWith(`"'`), `${v} is guarded`);
+    assert.deepEqual(parseCSV(`a\n${cell}\n`)[1], [v], `${v} imports back`);
+  }
+  assert.equal(csvCell('plain'), '"plain"');
+  assert.equal(csvCell("it's"), `"it's"`);
+  assert.deepEqual(parseCSV("a\n'quoted text\n")[1], ["'quoted text"], 'a leading quote before normal text is kept');
+});

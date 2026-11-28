@@ -37,7 +37,8 @@ from .conn import HostKeyUnknown, Session
 
 MAX_WORKERS = 4
 MAX_DEVICES = 300
-JOB_TTL = 3600
+JOB_TTL = 3600       # a finished job is kept this long (seconds) for windows that follow it
+JOB_MAX_AGE = 86400  # a job that never finished is dropped after this
 PLAN_TTL = 600
 ROLLBACK_MAX = 60  # minutes
 FINAL = ("done", "error", "hostkey", "skipped", "pending")
@@ -74,7 +75,9 @@ def new_job(lab, kind):
     job = {"id": secrets.token_urlsafe(12), "kind": kind, "lab": store.safe(lab), "created": time.time(), "done": False, "devices": {}}
     with _lock:
         now = time.time()
-        for k in [k for k, j in _jobs.items() if now - j["created"] > JOB_TTL]:
+        # a running job is never dropped (a long change set, a pending rollback), only a finished
+        # one, or one that is far too old to be still running
+        for k in [k for k, j in _jobs.items() if (j["done"] and now - j["created"] > JOB_TTL) or now - j["created"] > JOB_MAX_AGE]:
             del _jobs[k]
         for k in [k for k, p in _plans.items() if now - p["created"] > PLAN_TTL]:
             del _plans[k]
@@ -220,7 +223,9 @@ def render_for(lab, d, raw_ops):
 def _public(item):
     """What the browser sees of a rendered item (no SSH params, files with old and new text)."""
     ex = item.get("extra") or {}
+    pr = item.get("params") or {}
     return {"dev": item["dev"], "name": item["name"], "driver": item["driver"], "commands": item["commands"], "notes": item["notes"],
+            "target": {k: pr.get(k) for k in ("host", "port", "user")} if pr else None,
             "files": [{"path": f["path"], "old": f["old"], "content": f["content"]} for f in ex.get("files") or []],
             "canApply": item["canApply"], "safety": item["safety"], "ops": item.get("ops"), "labels": item.get("labels")}
 
@@ -404,11 +409,21 @@ def change_apply(lab, change_id, body):
     _check_enabled()
     if not isinstance(body, dict):
         raise ValueError("bad request")
-    doc = changes.begin_apply(lab, change_id, str(body.get("digest") or ""))
     password = body.get("password") if isinstance(body.get("password"), str) else None
     trust = body.get("trust") if isinstance(body.get("trust"), dict) else {}
     opts = _opts(body)
     stop = body.get("stopOnError", True) is not False
+    doc = changes.begin_apply(lab, change_id, str(body.get("digest") or ""))
+    try:
+        return _start_change(lab, doc, password, trust, opts, stop)
+    except BaseException:
+        changes.abort_apply(lab, doc["id"])  # nothing ran: the set is a draft again, not stuck in "applying"
+        raise
+    finally:
+        password = None  # noqa: F841
+
+
+def _start_change(lab, doc, password, trust, opts, stop):
     job = new_job(lab, "change")
     job["change"] = doc["id"]
     job["busy"] = True
@@ -419,18 +434,26 @@ def change_apply(lab, change_id, body):
 
     def run(password):  # an argument, not the closure: the caller drops its reference below
         results, failed = {}, False
-        for it in doc["items"]:
-            item = job["devices"][it["dev"]]
-            if failed and stop:
-                item.update(state="skipped", error="not applied: an earlier device failed")
-            elif not it.get("canApply"):
-                item.update(state="skipped", error="this item can not be applied automatically: send it to the console")
-            else:
-                pw = password if it["params"]["auth"] == "password" else None
-                ok = push(job, it, pw, str(trust.get(it["dev"]) or ""), opts, change_id=doc["id"])
-                failed = failed or not ok
-            results[it["dev"]] = {k: item.get(k) for k in ("state", "error", "backup", "applied", "rolledBack", "rollbackPending", "transcript")}
-            changed(job)
+        try:
+            for it in doc["items"]:
+                item = job["devices"][it["dev"]]
+                if failed and stop:
+                    item.update(state="skipped", error="not applied: an earlier device failed")
+                elif not it.get("canApply"):
+                    item.update(state="skipped", error="this item can not be applied automatically: send it to the console")
+                else:
+                    pw = password if it["params"]["auth"] == "password" else None
+                    ok = push(job, it, pw, str(trust.get(it["dev"]) or ""), opts, change_id=doc["id"])
+                    failed = failed or not ok
+                results[it["dev"]] = {k: item.get(k) for k in ("state", "error", "backup", "applied", "rolledBack", "rollbackPending", "transcript")}
+                changed(job)
+        except Exception as exc:  # noqa: BLE001  (a bug here must not leave the set "applying")
+            for it in doc["items"]:
+                if it["dev"] not in results:
+                    item = job["devices"][it["dev"]]
+                    if item.get("state") not in FINAL:
+                        item.update(state="error", error=f"not finished: {exc}")
+                    results[it["dev"]] = {k: item.get(k) for k in ("state", "error", "backup", "applied", "rolledBack", "rollbackPending", "transcript")}
         try:
             status = changes.finish_apply(lab, doc["id"], results)
             audit.record(lab, "change-finished", change=doc["id"], status=status,
@@ -439,7 +462,6 @@ def change_apply(lab, change_id, body):
             job["busy"] = False
             changed(job)
     _pool.submit(run, password)
-    password = None  # noqa: F841
     return snapshot(job["id"])
 
 

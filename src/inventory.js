@@ -52,7 +52,11 @@ export function csvRows(lab, devices) {
   }
   return rows;
 }
-const csvCell = c => `"${String(c ?? '').replace(/"/g, '""')}"`;
+// A cell that starts with = + - @ (or tab / CR) is a formula in Excel and LibreOffice, even in
+// quotes: device facts and DNS names reach these cells, so such a cell gets a leading ' (shown as
+// text). parseCSV() takes that ' off again, so an export imports back unchanged.
+const FORMULA = /^[=+\-@\t\r]/;
+export const csvCell = c => { const s = String(c ?? ''); return `"${(FORMULA.test(s) ? "'" + s : s).replace(/"/g, '""')}"`; };
 export function exportInventoryCsv(lab, devices, filename) {
   // BOM so Excel reads UTF-8; CRLF line ends as RFC 4180 asks
   download(filename, '﻿' + csvRows(lab, devices).map(r => r.map(csvCell).join(',')).join('\r\n'), 'text/csv');
@@ -77,7 +81,7 @@ export function parseCSV(text) {
     else f += c;
   }
   if (f !== '' || row.length) { row.push(f); rows.push(row); }
-  return rows.filter(r => r.some(x => x.trim() !== ''));
+  return rows.filter(r => r.some(x => x.trim() !== '')).map(r => r.map(x => (x[0] === "'" && FORMULA.test(x.slice(1)) ? x.slice(1) : x)));
 }
 
 const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');

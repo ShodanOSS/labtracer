@@ -29,6 +29,7 @@ import urllib.request
 import os
 import re
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -54,6 +55,7 @@ HISTORY_DIR = LAB_DIR / ".history"
 EXPORT_DIR = DATA_DIR / "export"
 LIBRARY_FILE = DATA_DIR / "library.json"
 LIBRARY_HISTORY_DIR = DATA_DIR / ".history"  # copies of library.json before a format upgrade
+DELETED_DIR = DATA_DIR / ".deleted"  # the operational data of deleted or replaced labs
 MONITOR_FILE = DATA_DIR / "monitor.json"  # agent URL + token; keep out of git
 
 MAX_BODY = 64 * 1024 * 1024  # 64 MB (custom GLB models are stored inline)
@@ -146,19 +148,65 @@ def keep_library_copy() -> None:
         shutil.copy2(LIBRARY_FILE, LIBRARY_HISTORY_DIR / f"library.{time.strftime('%Y%m%d-%H%M%S')}.json")
 
 
+def _copied_at(f: Path) -> float:
+    """When a history copy was made: the time in its name. (Its mtime is the time the lab was
+    saved before the copy, because copy2 keeps it, so it can be hours older.)"""
+    try:
+        return time.mktime(time.strptime(f.name.rsplit(".", 2)[-2], "%Y%m%d-%H%M%S"))
+    except (ValueError, IndexError, OverflowError):
+        return f.stat().st_mtime
+
+
 def rotate_history(lab: str, current: Path, force: bool = False) -> None:
     """Copy the current lab file into .history before it is overwritten."""
     if not current.exists():
         return
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     old = _history_of(lab)
-    if not force and old and time.time() - old[-1].stat().st_mtime < HISTORY_EVERY:
+    if not force and old and time.time() - _copied_at(old[-1]) < HISTORY_EVERY:
         return  # autosave: keep at most one copy per HISTORY_EVERY seconds
     stamp = time.strftime("%Y%m%d-%H%M%S")
     shutil.copy2(current, HISTORY_DIR / f"{lab}.{stamp}.json")
     old = _history_of(lab)
     for extra in old[:-HISTORY_KEEP]:
         extra.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- operational data of a lab
+def _ops_places(lab: str):
+    """(kind, path) of everything kept for a lab outside its lab file."""
+    return [("observed", observed.OBS_DIR / observed.safe(lab)), ("changes", changes.CHANGE_DIR / observed.safe(lab)),
+            ("backups", backups.BACKUP_DIR / observed.safe(lab)), ("discovery", discover.DISC_DIR / f"{observed.safe(lab)}.json")]
+
+
+def archive_ops(lab: str, why: str):
+    """The lab is deleted or replaced by a new lab with its name: move its collected facts, change
+    sets, backups, discovery result and audit log to data/.deleted/<lab>.<time>/. Nothing is
+    lost, and a new lab with this name does not get the old drafts, facts or audit log."""
+    dest = DELETED_DIR / f"{lab}.{time.strftime('%Y%m%d-%H%M%S')}"
+    moved = []
+    for kind, src in _ops_places(lab):
+        if src.exists():
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest / (kind + (".json" if src.suffix == ".json" else ""))))
+            moved.append(kind)
+    log, head = audit.retire(lab, dest)
+    if log:
+        moved.append("audit")
+    if moved:
+        audit.record(audit.SERVER, "lab-archived", archived=lab, reason=why, folder=str(dest.relative_to(ROOT)), moved=moved,
+                     auditHead=head or None)
+    return moved
+
+
+def copy_observed(src_lab: str, dst_lab: str):
+    """Save as: the new lab has the same devices, so it starts with the facts read from them
+    (drift works at once). Change sets, backups and the audit log stay with the original lab."""
+    src, dst = observed.OBS_DIR / observed.safe(src_lab), observed.OBS_DIR / observed.safe(dst_lab)
+    if src_lab == dst_lab or not src.is_dir() or dst.exists():
+        return False
+    shutil.copytree(src, dst)
+    return True
 
 
 # ---------------------------------------------------------------- monitoring agent proxy
@@ -307,12 +355,12 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(APP_DIR), **kwargs)
 
-    # quieter log: one line per API call, nothing for static files
     def list_directory(self, path):
         """No folder listings of app/: only the files the app loads are served."""
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         return None
 
+    # quieter log: one line per API call, nothing for static files
     def log_message(self, fmt, *args):
         if getattr(self, "path", "").startswith("/api/"):
             sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
@@ -324,7 +372,7 @@ class Handler(SimpleHTTPRequestHandler):
             host = host[1:host.find("]")] if "]" in host else ""
         elif host.count(":") == 1:  # name:port
             host = host.split(":")[0]
-        return host in ("127.0.0.1", "localhost", "::1") or host == self.server.allowed_host
+        return host in ("127.0.0.1", "localhost", "::1") or host in self.server.allowed_hosts
 
     def _write_ok(self) -> bool:
         return self.headers.get("X-LabTracer") == "1"
@@ -462,7 +510,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if act == "apply":
                         return self._json(collector.change_apply(lab, parts[2], data)) or True
             if head == "audit" and n == 2 and method == "GET":
-                lab = safe_name(parts[1])
+                lab = audit.SERVER if parts[1] == audit.SERVER else safe_name(parts[1])  # /api/audit/.server: the server log
                 entries = audit.read(lab, (q.get("device") or [None])[0], (q.get("limit") or [500])[0], (q.get("before") or [None])[0])
                 return self._json({"entries": entries, "verify": audit.verify(lab)}) or True
             if head == "backups" and n >= 3:
@@ -620,6 +668,10 @@ class Handler(SimpleHTTPRequestHandler):
             base = self.headers.get("X-LabTracer-Base")
             force = self.headers.get("X-LabTracer-Force") == "1"
             keep = force or self.headers.get("X-LabTracer-Keep-Copy") == "1"
+            # X-LabTracer-Replace: 1 = a new lab replaces the lab with this name (its data is archived).
+            # X-LabTracer-Copy-Of: <lab> = Save as: copy the collected facts of that lab.
+            replace = self.headers.get("X-LabTracer-Replace") == "1"
+            copy_of = safe_name(unquote(self.headers.get("X-LabTracer-Copy-Of") or ""), "")
             with _lock:
                 current = lab_version(target)
                 newer = downgrade_error(target, data)  # refused even with force: it would lose data
@@ -629,8 +681,12 @@ class Handler(SimpleHTTPRequestHandler):
                     return self._json({"error": "the lab was changed by another window", "conflict": True,
                                        "version": current}, HTTPStatus.CONFLICT)
                 rotate_history(name, target, force=keep)
+                if replace:
+                    archive_ops(name, "replaced by a new lab with the same name")
                 atomic_write(target, json.dumps(data, indent=1).encode("utf-8"))
                 version = lab_version(target)
+                if copy_of and copy_of != name and (LAB_DIR / f"{copy_of}.json").exists():
+                    copy_observed(copy_of, name)
             return self._json({"ok": True, "name": name, "saved": int(time.time()), "version": version})
         if path == "/api/monitor/config":
             if not isinstance(data, dict):
@@ -762,12 +818,40 @@ class Handler(SimpleHTTPRequestHandler):
             with _lock:
                 rotate_history(name, f, force=True)  # keep a copy in .history
                 f.unlink(missing_ok=True)
-            return self._json({"ok": True})
+                moved = archive_ops(name, "lab deleted")
+            return self._json({"ok": True, "archived": moved})
         return self._error(HTTPStatus.NOT_FOUND, "unknown endpoint")
 
     def do_OPTIONS(self):  # never approve cross-origin preflights
         self.send_response(HTTPStatus.FORBIDDEN)
         self.end_headers()
+
+
+def allowed_hosts(bind: str, extra=()) -> set:
+    """Host header values (no port) a request may have: the names that reach this server.
+    DNS rebinding works with the attacker's name in the Host header, so only known names pass.
+    A wildcard bind (0.0.0.0, ::) listens on every address: the computer's name and addresses."""
+    bind = bind.strip("[]").lower()
+    out = {bind} | {str(x).strip().strip("[]").lower() for x in extra if str(x).strip()}
+    if bind in ("0.0.0.0", "::", ""):
+        names = {socket.gethostname(), socket.getfqdn()}
+        out |= {n.lower() for n in names if n}
+        for n in names:
+            try:
+                out |= {ai[4][0].split("%")[0].lower() for ai in socket.getaddrinfo(n, None)}
+            except OSError:
+                pass
+        for fam, probe in ((socket.AF_INET, "192.0.2.1"), (socket.AF_INET6, "2001:db8::1")):
+            try:  # the address used for outgoing traffic (no packet is sent)
+                with socket.socket(fam, socket.SOCK_DGRAM) as s:
+                    s.connect((probe, 9))
+                    out.add(s.getsockname()[0].split("%")[0].lower())
+            except OSError:
+                pass
+    out.discard("0.0.0.0")
+    out.discard("::")
+    out.discard("")
+    return out
 
 
 def _is_loopback(host: str) -> bool:
@@ -785,16 +869,19 @@ def main():
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default 127.0.0.1, local only)")
     ap.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                    help="another name or address the server is reached by (a DNS name, a NAT address); repeatable")
     args = ap.parse_args()
 
     for d in (LAB_DIR, EXPORT_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    httpd.allowed_host = args.host.lower()
+    httpd.allowed_hosts = allowed_hosts(args.host, args.allow_host)
     ssh_bridge.ENABLED = guac.ENABLED = _is_loopback(args.host)
     if not ssh_bridge.ENABLED:
         print("SSH console is off: the server listens on a network address.")
+        print("Accepted host names: " + ", ".join(sorted(httpd.allowed_hosts)) + "  (add more with --allow-host)")
     url = f"http://127.0.0.1:{args.port}/"
     print(f"LabTracer running at {url}  (data: {DATA_DIR})")
     print("Press Ctrl+C to stop.")

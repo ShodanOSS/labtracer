@@ -15,7 +15,8 @@ import { lineDiff } from './diff.js';
 
 const HDR = { 'Content-Type': 'application/json', 'X-LabTracer': '1' };
 export const OPTION_DEFAULTS = { save: true, rollback: 5, onError: 'restore', stopOnError: true };
-const STATUS = { draft: 'staged', applying: 'applying…', applied: 'applied', failed: 'failed', partial: 'partly applied', discarded: 'discarded' };
+const STATUS = { draft: 'staged', applying: 'applying…', applied: 'applied', failed: 'failed', partial: 'partly applied', discarded: 'discarded',
+  interrupted: 'interrupted (the server stopped during the apply: check the devices and the audit log)' };
 const EVENT_TEXT = {
   'change-created': 'change set created', 'change-staged': 'staged', 'change-edited': 'change set edited', 'change-discarded': 'change set discarded',
   'change-apply': 'change set apply started', 'change-finished': 'change set finished', backup: 'backup', 'rollback-armed': 'rollback timer started',
@@ -23,6 +24,8 @@ const EVENT_TEXT = {
   rollback: 'rolled back', save: 'saved to startup', restore: 'backup restored', error: 'error', 'discover-start': 'discovery started',
   'discover-finish': 'discovery finished', 'discover-error': 'discovery failed', 'discover-adopt': 'devices added from discovery',
   'remote-open': 'remote session opened', 'remote-close': 'remote session closed', 'remote-failed': 'remote session failed',
+  'change-interrupted': 'change set interrupted', 'restore-refused': 'restore refused (other host)', 'hostkey-trusted': 'host key trusted',
+  'ssh-open': 'SSH console opened', 'ssh-close': 'SSH console closed', 'ssh-failed': 'SSH console failed', collect: 'collect run',
 };
 
 async function api(method, url, body) {
@@ -78,7 +81,7 @@ export class ChangeManager {
         this.app.store.setPref(this.prefKey(), this.current.id);
       }
       this.current = await api('POST', `${this.base()}/${this.current.id}/items`, {
-        items: [{ device: this.app.collect.params(d), ops: items.flatMap(it => it.push.ops), labels: items.map(it => (it.push.danger ? '⚠ ' : '') + it.push.label) }] });
+        items: [{ device: this.app.collect.params(d), groups: items.map(it => ({ label: (it.push.danger ? '⚠ ' : '') + it.push.label, ops: it.push.ops })) }] });
       this.changed();
       await this.refreshList();
       toast(`Staged ${items.length} change(s) for ${d.name} · ${this.current.items.length} device(s) in "${this.current.title}"`, 'ok', 3500);
@@ -118,7 +121,7 @@ export class ChangeManager {
       const r = res[it.dev];
       return h('div', { class: 'chg-item' + (r ? ' st-' + r.state : '') },
         h('div', { class: 'chg-head' },
-          h('b', null, `${i + 1}. ${it.name}`), h('span', { class: 'muted small' }, ` ${it.driver}${it.canApply ? '' : ' · console only'}`),
+          h('b', null, `${i + 1}. ${it.name}`), h('span', { class: 'muted small' }, ` ${it.driver}${it.target?.host ? ` · ${it.target.user ? it.target.user + '@' : ''}${it.target.host}${it.target.port && +it.target.port !== 22 ? ':' + it.target.port : ''}` : ''}${it.canApply ? '' : ' · console only'}`),
           r ? h('span', { class: 'stbadge ' + (r.state === 'done' ? 'st-up' : r.state === 'skipped' ? 'st-unknown' : 'st-down') }, r.state === 'done' ? 'applied' : r.state) : null,
           h('span', { class: 'grow' }),
           !ro && i > 0 ? h('button', { class: 'mini', title: 'Apply earlier', onclick: () => reopen({ move: it.dev, by: -1 }) }, '↑') : null,

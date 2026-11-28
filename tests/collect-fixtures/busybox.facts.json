@@ -116,5 +116,6 @@
  "arp": null,
  "macTable": null,
  "platform": {},
- "rawConfig": ""
+ "rawConfig": "",
+ "descriptions": false
 }

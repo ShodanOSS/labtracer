@@ -596,17 +596,21 @@ def run(ws: WebSocket, p):
     """Blocks until the session ends. Called on the HTTP handler thread."""
     trust_q = queue.Queue()
     eng = (ParamikoEngine if p["engine"] == "paramiko" else SystemEngine)(p, ws, trust_q)
-    state = {"up": False, "last": time.time(), "done": False, "started": time.time()}
+    state = {"up": False, "init": False, "last": time.time(), "done": False, "started": time.time()}
+    slock = threading.Lock()  # "done" and "up" change together: the connect thread and a close can race
     with _lock:
         _live.add(id(ws))
 
     def finish(reason=None, error=None):
-        if state["done"]:
-            return
-        state["done"] = True
-        if state["up"]:
-            _audit(p, "ssh-close", seconds=round(time.time() - state["started"]))
-        else:
+        """The one way a session ends (device, browser, idle timer): logged once, engine closed once."""
+        with slock:
+            if state["done"]:
+                return
+            state["done"] = True
+            up, init = state["up"], state["init"]
+        if up:
+            _audit(p, "ssh-close", seconds=round(time.time() - state["started"]), reason=reason or None)
+        elif init:  # a connection was asked for and did not come up
             _audit(p, "ssh-failed", error=(error or reason or "")[:300])
         if error:
             ws.send_json({"type": "error", "text": error})
@@ -622,8 +626,14 @@ def run(ws: WebSocket, p):
             return finish("Not connected.", _err_text(exc))
         finally:
             password = None  # noqa: F841 (drop the reference)
-        state["up"] = True
-        state["started"] = time.time()
+        with slock:
+            late = state["done"]  # the console was closed while this connected: finish() closed nothing yet
+            if not late:
+                state["up"] = True
+                state["started"] = time.time()
+        if late:
+            eng.close()  # else the SSH session stays open on the device (IOS has only 5 VTY lines)
+            return None
         _audit(p, "ssh-open")
         ws.send_json({"type": "connected"})
         try:
@@ -667,6 +677,7 @@ def run(ws: WebSocket, p):
             t = m.get("type") if isinstance(m, dict) else None
             if t == "init" and not started:
                 started = True
+                state["init"] = True
                 cols, rows = _clamp(m.get("cols"), 10, 500, 80), _clamp(m.get("rows"), 3, 300, 24)
                 pw = m.get("password") if p["auth"] == "password" and p["engine"] == "paramiko" else None
                 m = None
@@ -681,8 +692,7 @@ def run(ws: WebSocket, p):
                 trust_q.put(bool(m.get("accept")))
     finally:
         trust_q.put(False)  # free a waiting host key question
-        state["done"] = True
-        eng.close()
+        finish("Closed by the browser.")  # logs ssh-close and closes the engine, unless already finished
         ws.close()
         with _lock:
             _live.discard(id(ws))

@@ -78,6 +78,7 @@ def _bad(text):
 
 def parse(o):
     f = new_facts(NAME)
+    f["descriptions"] = True  # the interface comment is the description
     s = f["system"]
     s["vendor"] = "MikroTik"
     s["hostname"] = _lines(o.get("identity")).get("name", "")

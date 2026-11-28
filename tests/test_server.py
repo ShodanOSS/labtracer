@@ -139,6 +139,39 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(any('"monitor-config"' in line for line in log))
         self.assertFalse(any("uuuu" in line or "tttt" in line for line in log), "no secret in the audit log")
 
+    def _ops_files(self, lab):
+        d = self.tmp / "data"
+        (d / "observed" / lab).mkdir(parents=True, exist_ok=True)
+        (d / "observed" / lab / "dev_1.json").write_text('{"facts": {"collected": 1}, "configs": []}')
+        (d / "changes" / lab).mkdir(parents=True, exist_ok=True)
+        (d / "changes" / lab / "abcdefgh12.json").write_text('{"id": "abcdefgh12", "status": "draft", "items": []}')
+        return d
+
+    def test_delete_archives_the_operational_data(self):
+        self.assertEqual(self.put_lab("arch-lab", force=True)[0], 200)
+        d = self._ops_files("arch-lab")
+        st, _, doc = self.req("POST", "/api/delete/arch-lab", {}, {"X-LabTracer": "1", "Content-Type": "application/json"})
+        self.assertEqual(st, 200)
+        self.assertIn("observed", doc["archived"])
+        self.assertFalse((d / "observed" / "arch-lab").exists(), "a new lab with this name starts without the old facts")
+        self.assertFalse((d / "changes" / "arch-lab").exists(), "... and without the old drafts")
+        kept = list((d / ".deleted").glob("arch-lab.*/observed/dev_1.json"))
+        self.assertEqual(len(kept), 1, "nothing is lost")
+        st, _, log = self.req("GET", "/api/audit/.server")
+        self.assertEqual(st, 200, "the server log can be read")
+        self.assertTrue(any(e["event"] == "lab-archived" and e.get("archived") == "arch-lab" for e in log["entries"]))
+
+    def test_replace_archives_and_save_as_copies_the_facts(self):
+        self.put_lab("rep-lab", force=True)
+        d = self._ops_files("rep-lab")
+        h = {"X-LabTracer": "1", "Content-Type": "application/json", "X-LabTracer-Force": "1"}
+        self.assertEqual(self.req("PUT", "/api/labs/rep-copy", {"devices": []}, {**h, "X-LabTracer-Copy-Of": "rep-lab"})[0], 200)
+        self.assertTrue((d / "observed" / "rep-copy" / "dev_1.json").is_file(), "Save as: the copy has the facts")
+        self.assertFalse((d / "changes" / "rep-copy").exists(), "change sets stay with the original")
+        self.assertEqual(self.req("PUT", "/api/labs/rep-lab", {"devices": []}, {**h, "X-LabTracer-Replace": "1"})[0], 200)
+        self.assertFalse((d / "observed" / "rep-lab").exists(), "replaced: the old lab's facts are archived")
+        self.assertTrue((d / "observed" / "rep-copy").exists(), "the copy keeps its own")
+
     # ---- save conflicts between two windows
     def test_save_conflict(self):
         name = "conflict-test"
@@ -285,6 +318,29 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(st, 400)
         st, _, _ = self.req("POST", "/api/remediate/apply", {"planId": "made-up"})
         self.assertEqual(st, 403, "apply needs the X-LabTracer header")
+
+
+class ServerHelpersTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT))
+        import server  # noqa: PLC0415
+        cls.server = server
+
+    def test_wildcard_bind_accepts_the_names_of_this_computer(self):
+        hosts = self.server.allowed_hosts("0.0.0.0", ["lab.example.com"])
+        self.assertIn(socket.gethostname().lower(), hosts)
+        self.assertIn("lab.example.com", hosts)
+        self.assertNotIn("0.0.0.0", hosts)
+        self.assertNotIn("evil.example", hosts)
+        self.assertEqual(self.server.allowed_hosts("192.0.2.5"), {"192.0.2.5"}, "a specific address: only that one")
+
+    def test_history_spacing_uses_the_time_of_the_copy(self):
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "lab.20260101-120000.json"
+            f.write_text("{}")
+            os.utime(f, (0, 0))  # copy2 keeps the old mtime of the lab file
+            self.assertAlmostEqual(self.server._copied_at(f), time.mktime((2026, 1, 1, 12, 0, 0, 0, 0, -1)), delta=1)
 
 
 class SshBridgeTest(unittest.TestCase):

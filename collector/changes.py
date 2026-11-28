@@ -7,7 +7,13 @@ applied as a whole, device after device in the listed order, only with the diges
 version the user reviewed: a change to the set after the review needs a new review.
 
 Status: draft -> applying -> applied | failed | partial;  draft -> discarded.
-Applied and discarded sets stay as a record (with each device's result and backup id).
+A set found "applying" when no apply runs in this process (the server stopped during the
+apply) becomes "interrupted": what reached the devices is in the audit log and the backups.
+Applied, discarded and interrupted sets stay as a record (with each device's result and backup id).
+
+Each item keeps its operations in groups: one group per staged drift item, with the label the
+user reviews ({label, ops}). One drift item can need several operations (a route change is a
+delete and an add), so removing a change removes its whole group, never a single operation.
 """
 
 import getpass
@@ -20,13 +26,15 @@ import threading
 import time
 from pathlib import Path
 
-from . import audit, store
+from . import audit, ops as opsmod, store
 
 CHANGE_DIR = Path(__file__).resolve().parent.parent / "data" / "changes"
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,32}$")
 MAX_ITEMS = 100
 KEEP = 200
-_lock = threading.Lock()
+_lock = threading.RLock()  # re-entrant: list_for() can mark an interrupted set while _prune() holds it
+_active = set()  # ids of the change sets an apply is running for in this process
+TARGET = ("host", "port", "user", "auth", "keyFile", "legacy")  # the connection a digest covers
 render_for = None  # set by collector/__init__.py (avoids an import cycle)
 
 
@@ -59,9 +67,81 @@ def _read(lab, cid):
 
 
 def digest(doc):
-    body = [(it["dev"], it["driver"], it["commands"], [(f["path"], f["content"]) for f in (it.get("extra") or {}).get("files") or []])
+    """What the user reviews and apply checks: per device, where it connects, the driver, the
+    commands and the files. The target is included, so a re-staged item with another host or
+    user needs a new review even when its commands did not change."""
+    body = [(it["dev"], [(it.get("params") or {}).get(k) for k in TARGET], it["driver"], it["commands"],
+             [(f["path"], f["content"]) for f in (it.get("extra") or {}).get("files") or []])
             for it in doc.get("items") or []]
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+
+
+def _label(v, ops):
+    text = str(v or "").strip()[:200]
+    return text or ", ".join(o["op"] for o in ops)
+
+
+def item_groups(it):
+    """The {label, ops} groups of a stored item. Items staged before groups existed have
+    ops and labels: one label per operation pairs up; otherwise all operations are one group
+    (removing it removes them all, never a part of a change)."""
+    if isinstance(it.get("groups"), list):
+        return it["groups"]
+    o, labels = it.get("ops") or [], [str(x) for x in it.get("labels") or []]
+    if o and len(labels) == len(o):
+        return [{"label": lb, "ops": [x]} for lb, x in zip(labels, o)]
+    return [{"label": " + ".join(labels) or _label("", o), "ops": list(o)}] if o else []
+
+
+def _incoming(x):
+    """Groups sent by the browser: {groups: [{label, ops}]}. A page from before groups sends
+    {ops, labels}: paired one to one when the counts match, else one group."""
+    if isinstance(x.get("groups"), list):
+        out = []
+        for g in x["groups"]:
+            if not isinstance(g, dict):
+                raise ValueError("bad change group")
+            clean = opsmod.validate(g.get("ops"))
+            out.append({"label": _label(g.get("label"), clean), "ops": clean})
+        if not out:
+            raise ValueError("no operations")
+        return out
+    clean = opsmod.validate(x.get("ops") if isinstance(x.get("ops"), list) else [])
+    labels = [str(s)[:200] for s in (x.get("labels") or []) if isinstance(s, (str, int, float))][:200]
+    if len(labels) == len(clean):
+        return [{"label": _label(lb, [o]), "ops": [o]} for lb, o in zip(labels, clean)]
+    return [{"label": _label(" + ".join(labels), clean), "ops": clean}]
+
+
+def _flat(groups):
+    """The operations of all groups in order, each once (two drift items can need the same one)."""
+    out = []
+    for g in groups:
+        for o in g["ops"]:
+            if o not in out:
+                out.append(o)
+    return out
+
+
+def _rendered(lab, device, groups):
+    item = render_for(lab, device, _flat(groups))
+    item["groups"] = [{"label": g["label"], "ops": g["ops"]} for g in groups]
+    item["labels"] = [g["label"] for g in groups]
+    return item
+
+
+def _mark_interrupted(lab, doc):
+    """A set left "applying" by a server that stopped: a record, no longer a running apply."""
+    if doc.get("status") != "applying" or doc.get("id") in _active:
+        return doc
+    with _lock:
+        doc["status"] = "interrupted"
+        doc["updated"] = time.time()
+        doc.setdefault("results", {})
+        _write(lab, doc)
+    audit.record(lab, "change-interrupted", change=doc["id"], title=doc.get("title"),
+                 reason="the server stopped while the change set was applied: check the devices, the audit log and the backups")
+    return doc
 
 
 def public(doc):
@@ -82,8 +162,8 @@ def list_for(lab):
     out = []
     for p in folder.glob("*.json") if folder.is_dir() else []:
         try:
-            out.append(summary(json.loads(p.read_text("utf-8"))))
-        except (OSError, ValueError):
+            out.append(summary(_mark_interrupted(lab, json.loads(p.read_text("utf-8")))))
+        except (OSError, ValueError, KeyError):
             continue
     out.sort(key=lambda d: d.get("created") or 0, reverse=True)
     return out
@@ -112,6 +192,9 @@ def get(lab, cid):
     doc = _read(lab, cid)
     if not doc:
         raise ValueError("no such change set")
+    doc = _mark_interrupted(lab, doc)
+    if doc["status"] == "draft":
+        doc["digest"] = digest(doc)  # drafts saved by an older version: their digest did not cover the targets
     return doc
 
 
@@ -123,8 +206,9 @@ def _draft(lab, cid):
 
 
 def add(lab, cid, body):
-    """body: {items: [{device: params, ops: [...], labels: [...]}]}. Ops for a device already in the
-    set are added to its item, and its commands are rendered again."""
+    """body: {items: [{device: params, groups: [{label, ops}]}]} (or {device, ops, labels} from an
+    older page). Groups for a device already in the set are added to its item (a group with the
+    same operations as one there is not added twice), and its commands are rendered again."""
     if not isinstance(body, dict) or not isinstance(body.get("items"), list) or not body["items"]:
         raise ValueError("items must be a list")
     with _lock:
@@ -134,11 +218,11 @@ def add(lab, cid, body):
                 raise ValueError("each item needs a device")
             dev = store.safe(str(x["device"]["id"]))
             cur = next((it for it in doc["items"] if it["dev"] == dev), None)
-            new_ops = x.get("ops") if isinstance(x.get("ops"), list) else []
-            labels = [str(s)[:200] for s in (x.get("labels") or []) if isinstance(s, (str, int, float))][:200]
-            all_ops = (cur["ops"] if cur else []) + [o for o in new_ops if not cur or o not in cur["ops"]]
-            item = render_for(lab, x["device"], all_ops)
-            item["labels"] = ((cur or {}).get("labels") or []) + [s for s in labels if s not in ((cur or {}).get("labels") or [])]
+            groups = list(item_groups(cur)) if cur else []
+            for g in _incoming(x):
+                if not any(g["ops"] == h["ops"] for h in groups):
+                    groups.append(g)
+            item = _rendered(lab, x["device"], groups)
             if cur:
                 doc["items"][doc["items"].index(cur)] = item
             else:
@@ -149,12 +233,13 @@ def add(lab, cid, body):
         doc["digest"] = digest(doc)
         _write(lab, doc)
     audit.record(lab, "change-staged", change=cid, devices=[store.safe(str(x["device"]["id"])) for x in body["items"]],
-                 ops=[x.get("ops") for x in body["items"]], digest=doc["digest"])
+                 groups=[[{"label": g["label"], "ops": g["ops"]} for g in _incoming(x)] for x in body["items"]],
+                 digest=doc["digest"])
     return public(doc)
 
 
 def edit(lab, cid, body):
-    """body: {title?, note?, remove?: dev, move?: dev, by?: -1|1, dropOp?: [dev, index]}."""
+    """body: {title?, note?, remove?: dev, move?: dev, by?: -1|1, dropOp?: [dev, index of the change (group)]}."""
     body = body if isinstance(body, dict) else {}
     with _lock:
         doc = _draft(lab, cid)
@@ -177,16 +262,17 @@ def edit(lab, cid, body):
         if isinstance(body.get("dropOp"), list) and len(body["dropOp"]) == 2:
             dev, i = body["dropOp"]
             it = next((x for x in doc["items"] if x["dev"] == dev), None)
-            if it and isinstance(i, int) and 0 <= i < len(it["ops"]):
-                rest = it["ops"][:i] + it["ops"][i + 1:]
+            groups = item_groups(it) if it else []
+            if it and isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(groups):
+                dropped = groups[i]
+                rest = groups[:i] + groups[i + 1:]
                 if rest:
-                    new = render_for(lab, {"id": dev, "name": it["name"], **{k: v for k, v in (it.get("params") or {}).items() if k != "engine"},
-                                           "driver": it["driver"]}, rest)
-                    new["labels"] = [s for k, s in enumerate(it.get("labels") or []) if k != i]
-                    doc["items"][doc["items"].index(it)] = new
+                    device = {"id": dev, "name": it["name"], **{k: v for k, v in (it.get("params") or {}).items() if k != "engine"},
+                              "driver": it["driver"]}
+                    doc["items"][doc["items"].index(it)] = _rendered(lab, device, rest)
                 else:
                     doc["items"].remove(it)
-                what.append(f"dropped an operation on {dev}")
+                what.append(f"removed \"{dropped['label']}\" from {dev}")
         doc["updated"] = time.time()
         doc["digest"] = digest(doc)
         _write(lab, doc)
@@ -214,8 +300,20 @@ def begin_apply(lab, cid, reviewed):
             raise ValueError("the change set changed since you reviewed it (another window?). Review it again.")
         doc["status"] = "applying"
         doc["updated"] = time.time()
+        _active.add(doc["id"])
         _write(lab, doc)
     return doc
+
+
+def abort_apply(lab, cid):
+    """The apply could not start (nothing was sent to a device): the set is a draft again."""
+    with _lock:
+        _active.discard(cid)
+        doc = _read(lab, cid)
+        if doc and doc["status"] == "applying":
+            doc["status"] = "draft"
+            doc["updated"] = time.time()
+            _write(lab, doc)
 
 
 def finish_apply(lab, cid, results):
@@ -228,4 +326,5 @@ def finish_apply(lab, cid, results):
         doc["applied"] = time.time()
         doc["updated"] = time.time()
         _write(lab, doc)
+        _active.discard(cid)
     return doc["status"]

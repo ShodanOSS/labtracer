@@ -37,8 +37,10 @@ export class LabFiles {
   async newLabDialog() {
     if (!await this.confirmDiscard()) return;
     const name = await promptText('New lab', 'Lab name', await this.freeLabName('new-lab'), 'Create'); if (!name) return;
-    if (!await this.confirmOverwrite(safeName(name))) return;
-    this.loadLab(newLab(safeName(name)), name); await this.save(true, { force: true }); // replace was confirmed
+    const replace = await this.labExists(safeName(name));
+    if (replace && !await this.confirmOverwrite(safeName(name))) return;
+    // replace was confirmed: the old lab's facts, change sets, backups and audit log are archived, not inherited
+    this.loadLab(newLab(safeName(name)), name); await this.save(true, { force: true, replace });
   }
   async openDialog() {
     let labs = [];
@@ -51,11 +53,17 @@ export class LabFiles {
   }
   async saveAs() {
     const name = await promptText('Save as', 'New lab name', await this.freeLabName(this.labName + '-copy'), 'Save'); if (!name) return;
-    if (safeName(name) !== this.labName && !await this.confirmOverwrite(safeName(name))) return;
-    this.labName = safeName(name); this.lab.name = this.labName; this.conflict = false;
+    const from = this.labName, to = safeName(name);
+    if (to === from) { await this.save(false); return; }
+    const replace = await this.labExists(to);
+    if (replace && !await this.confirmOverwrite(to)) return;
+    this.labName = to; this.lab.name = this.labName; this.conflict = false;
     document.getElementById('lab-name').textContent = this.labName;
     store.setPref('lastLab', this.labName);
-    await this.save(false, { force: true }); // the name is free, or replacing it was confirmed
+    // the name is free, or replacing it was confirmed (the replaced lab's data is archived);
+    // the copy starts with the facts collected for the devices of the original lab
+    await this.save(false, { force: true, replace, copyOf: from });
+    this.collect?.load(); this.changes?.load(); this.discover?.load();
   }
   async importLab() {
     if (!await this.confirmDiscard()) return;

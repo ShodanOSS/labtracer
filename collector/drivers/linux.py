@@ -72,6 +72,7 @@ def parse(sec):
             sysf["os"] = "DD-WRT"
 
     ifs = _parse_ip_json(sec.get("ipaddr", ""))
+    f["descriptions"] = ifs is not None  # ip -j has the alias (description) of each interface; the text tools do not
     if ifs is None:
         txt = sec.get("ipaddrtxt", "")
         ifs = _parse_ifconfig(txt) if "Link encap" in txt or "HWaddr" in txt else _parse_ip_text(txt)
@@ -162,6 +163,7 @@ def _parse_ip_json(text):
             kind=_kind(name, i.get("link_type", ""), bool(i.get("link"))),
             vlan=_sub_vlan(name),
             master=i.get("master") or "",
+            desc=str(i.get("ifalias") or ""),
         ))
     return out
 

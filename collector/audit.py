@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -55,6 +56,11 @@ def _save_head(lab, seq, h):
     the head one entry behind, which verify() accepts."""
     heads = _heads()
     heads[lab] = {"seq": seq, "hash": h}
+    _write_heads(heads)
+
+
+def _write_heads(heads):
+    AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     tmp = AUDIT_DIR / (HEADS + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(heads, fh, separators=(",", ":"))
@@ -133,6 +139,28 @@ def record(lab, event, **fields):
     except Exception as exc:  # noqa: BLE001
         print(f"audit: could not write {event} for {lab}: {exc}")
         return None
+
+
+def retire(lab, dest_dir):
+    """The lab was deleted or replaced: move its log to dest_dir, and forget its head, so a new
+    lab with the same name starts a new log (verify() of it is not "the log was deleted").
+    Returns (new path or None, the head it had: {seq, hash} or {})."""
+    lab = _safe(lab)
+    if lab == SERVER:
+        raise ValueError("the server log is never retired")
+    with _lock:
+        p = _path(lab)
+        heads = _heads()
+        head = heads.pop(lab, None) or {}
+        moved = None
+        if p.is_file():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            moved = dest_dir / p.name
+            shutil.move(str(p), str(moved))
+        if head:
+            _write_heads(heads)
+        _last.pop(lab, None)
+    return moved, head
 
 
 def read(lab, device=None, limit=500, before=None):

@@ -35,6 +35,7 @@ CONFIG_FILE = DATA_DIR / "remote.json"
 ENABLED = True  # server.py turns this off for a non-loopback bind
 MAX_SESSIONS = 8
 SID_TTL = 30
+MAX_PENDING = 1024 * 1024  # characters of one unfinished instruction from the browser (clipboard and blobs come in small chunks)
 PROTOCOLS = {"rdp": 3389, "vnc": 5900, "ssh": 22, "telnet": 23}
 SECURITY = ("any", "nla", "nla-ext", "tls", "rdp", "vmconnect")
 CLIENT_OPCODES = {"ack", "blob", "clipboard", "disconnect", "end", "key", "mouse", "nop", "size", "sync", "touch"}
@@ -340,6 +341,8 @@ def run(ws, p):
                 continue
             pending += msg.decode("utf-8", "replace")
             ins, pending, done = parse(pending)
+            if len(pending) > MAX_PENDING:  # an instruction that never ends: not a Guacamole client
+                raise ValueError("instruction too long")
             forward = []
             for e in ins:
                 if e[0] == "":  # internal: the tunnel ping is answered by this server

@@ -1,8 +1,11 @@
 """Tests for remediation (push the plan to a device): operation validation, command
 rendering, IOS apply on a fake CLI, and the plan/apply rules. No device needed."""
 
+import json
+import queue
 import socket
 import sys
+import threading
 import tempfile
 import time
 import unittest
@@ -256,6 +259,92 @@ class PlanTest(unittest.TestCase):
         self.assertFalse(r["canApply"])
         self.assertTrue(r["commands"])
         self.assertIn("paramiko", r["notes"][0])
+
+
+class SshConsoleTest(unittest.TestCase):
+    """ssh_bridge.run with a fake WebSocket and a fake engine: how a session ends."""
+    P = {"host": "192.0.2.1", "port": 22, "user": "u", "engine": "paramiko", "auth": "key", "keyFile": "", "legacy": False,
+         "lab": "lab", "device": "d1", "name": "r1"}
+
+    class WS:
+        def __init__(self):
+            self.q, self.sent, self.closed = queue.Queue(), [], False
+
+        def recv(self):
+            return self.q.get(timeout=5)
+
+        def send_json(self, o):
+            self.sent.append(o)
+
+        def send_bin(self, d):
+            pass
+
+        def close(self, code=1000):
+            self.closed = True
+
+    def setUp(self):
+        gate, engines = threading.Event(), []
+
+        class Eng:
+            def __init__(self, p, ws, trust_q):
+                self.client, self.closes, self.dead = None, 0, threading.Event()
+                engines.append(self)
+
+            def connect(self, cols, rows, password=None):
+                gate.wait(5)
+                self.client = object()
+
+            def read(self):
+                self.dead.wait(5)
+                return b""
+
+            def close(self):
+                self.closes += (1 if self.client else 0)
+                self.dead.set()
+
+            def exit_status(self):
+                return None
+        self.gate, self.engines, self.events = gate, engines, []
+        for patch in (mock.patch.object(ssh_bridge, "ParamikoEngine", Eng),
+                      mock.patch.object(ssh_bridge, "audit_hook", lambda lab, ev, **f: self.events.append(ev))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def init(self, ws):
+        ws.q.put((0x1, json.dumps({"type": "init", "cols": 80, "rows": 24}).encode()))
+
+    def wait(self, cond):
+        for _ in range(250):
+            if cond():
+                return
+            time.sleep(0.02)
+        self.fail("timed out")
+
+    def test_browser_close_is_logged(self):
+        self.gate.set()
+        ws = self.WS()
+        self.init(ws)
+        t = threading.Thread(target=ssh_bridge.run, args=(ws, dict(self.P)))
+        t.start()
+        self.wait(lambda: "ssh-open" in self.events)
+        ws.q.put((None, None))  # the user closes the console
+        t.join(5)
+        self.assertEqual(self.events, ["ssh-open", "ssh-close"])
+        self.assertEqual(self.engines[0].closes, 1)
+
+    def test_a_connect_that_ends_after_the_close_is_closed(self):
+        ws = self.WS()
+        self.init(ws)
+        t = threading.Thread(target=ssh_bridge.run, args=(ws, dict(self.P)))
+        t.start()
+        self.wait(lambda: self.engines)
+        ws.q.put((None, None))  # closed while it still connects
+        t.join(5)
+        self.assertEqual(self.events, ["ssh-failed"])
+        self.gate.set()  # now the device answers
+        self.wait(lambda: self.engines[0].closes == 1)
+        time.sleep(0.1)
+        self.assertNotIn("ssh-open", self.events, "a session that came too late is not reported as open")
 
 
 class KeyFileTest(unittest.TestCase):

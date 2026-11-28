@@ -142,7 +142,7 @@ class App {
     this.saveChain = (this.saveChain || Promise.resolve()).then(run, run);
     return this.saveChain;
   }
-  async doSave(quiet, { force = false } = {}) {
+  async doSave(quiet, { force = false, replace = false, copyOf = null } = {}) {
     if (!this.lab) return;
     const ae = document.activeElement;
     if (!quiet && ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName) && !ae.classList.contains('term-in')) ae.dispatchEvent(new Event('change'));
@@ -150,7 +150,7 @@ class App {
       this.lab.view.mode = this.inventoryOn ? 'inventory' : this.viewport.mode;
       this.lab.view.mode3d = this.viewport.mode; this.lab.view.roomId = this.roomId;
       const rev = this.rev, name = this.labName, keepCopy = !!this.migratedFrom;
-      await store.saveLab(name, this.lab, { force, keepCopy, oldVersion: this.migratedFrom });
+      await store.saveLab(name, this.lab, { force, keepCopy, oldVersion: this.migratedFrom, replace, copyOf });
       if (this.rev === rev && this.labName === name) this.dirty = false;
       if (keepCopy && this.labName === name) this.migratedFrom = null;
       this.conflict = false; this.saveBlocked = false; this.lastSaved = Date.now(); this.updateStatus();

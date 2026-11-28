@@ -213,6 +213,10 @@ export function compareDevice(lab, d, facts) {
       add({ key: `desc:${p.id}`, area: 'interface', sev: 'info', text: `${p.name} description is "${fi.desc}" on the device`, planned: p.desc, actual: fi.desc,
         accept: { label: 'Use the device description', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.desc = fi.desc; } },
         push: P('Set the model description', [{ op: 'iface-desc', port: fi.name, desc: p.desc || '' }]) });
+    else if (!fi.desc && p.desc && facts.descriptions) // only drivers that read descriptions: else "empty" means "not read"
+      add({ key: `desc:${p.id}`, area: 'interface', sev: 'info', text: `${p.name} has no description on the device; the model has "${p.desc}"`, planned: p.desc, actual: '',
+        accept: { label: 'Clear the model description', run: (lab, dev) => { const q = portById(dev, p.id); if (q) q.desc = ''; } },
+        push: P('Set the model description', [{ op: 'iface-desc', port: fi.name, desc: p.desc }]) });
     if (fi.operUp === false && fi.adminUp !== false && p.enabled && linksOfPort(lab, d.id, p.id).some(l => l.medium !== 'power'))
       add({ key: `down:${p.id}`, area: 'link', sev: 'warn', text: `${p.name} has a cable in the model, but the link is down`, planned: 'up', actual: 'down' });
     switchport(add, d, p, fi);
@@ -329,22 +333,40 @@ function vlans(add, d, facts) {
 
 function routes(add, d, facts) {
   if (!Array.isArray(facts.routes)) return;
-  const act = new Map(facts.routes.map(r => [destKey(r.dest), r]));
+  // A destination can have several routes on the device (two default routes with different
+  // metrics, load sharing): keep them all, a Map by destination would keep only the last one.
+  const act = new Map();
+  for (const r of facts.routes) { const k = destKey(r.dest); if (!act.has(k)) act.set(k, []); act.get(k).push(r); }
   const plan = new Map((d.routes || []).map((r, i) => [destKey(r.dest), { ...r, i }]));
   const hop = r => r.via || (r.dev ? `dev ${r.dev}` : '');
   const rop = (op, dest, r) => ({ op, dest, via: r.via || '', dev: r.via ? '' : (r.dev || '') });
+  const same = (a, r) => (a.via || '') === (r.via || '');
   for (const [dest, r] of plan) {
-    const a = act.get(dest);
-    if (!a) add({ key: `route-missing:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} via ${hop(r) || '?'} is not on the device`, planned: `${dest} ${hop(r)}`, actual: 'missing',
-      accept: { label: 'Remove the route from the model', run: (lab, dev) => { dev.routes = dev.routes.filter(x => destKey(x.dest) !== dest); } },
-      push: hop(r) ? P('Add the route on the device', [rop('route-add', dest, r)]) : null });
-    else if ((a.via || '') !== (r.via || '') && !(!r.via && !a.via)) add({ key: `route-via:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} goes via ${hop(a)} on the device, via ${hop(r)} in the model`, planned: hop(r), actual: hop(a),
+    const list = act.get(dest) || [];
+    if (!list.length) {
+      add({ key: `route-missing:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} via ${hop(r) || '?'} is not on the device`, planned: `${dest} ${hop(r)}`, actual: 'missing',
+        accept: { label: 'Remove the route from the model', run: (lab, dev) => { dev.routes = dev.routes.filter(x => destKey(x.dest) !== dest); } },
+        push: hop(r) ? P('Add the route on the device', [rop('route-add', dest, r)]) : null });
+      continue;
+    }
+    const match = list.find(a => same(a, r));
+    if (match) { // the model's route is there; others for the same destination are reported, not "wrong next hop"
+      for (const a of list) if (a !== match && !same(a, match))
+        add({ key: `route-alt:${dest}:${hop(a)}`, area: 'route', sev: 'info', text: `Route ${dest} also goes via ${hop(a)} on the device (a second route for it: another metric, or load sharing)`, planned: hop(r), actual: hop(a),
+          push: P(`Delete the route via ${hop(a)} on the device`, [rop('route-del', dest, a)], dest === '0.0.0.0/0') });
+      continue;
+    }
+    if (!r.via && !list.some(a => a.via)) continue; // interface routes on both sides: not compared
+    const a = list[0];
+    add({ key: `route-via:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} goes via ${list.map(hop).join(' and ')} on the device, via ${hop(r)} in the model`, planned: hop(r), actual: list.map(hop).join(', '),
       accept: { label: `Use ${hop(a)}`, run: (lab, dev) => { const x = dev.routes.find(y => destKey(y.dest) === dest); if (x) { x.via = a.via || ''; x.dev = a.via ? '' : (a.dev || ''); } } },
-      push: hop(r) ? P(`Route via ${hop(r)}`, [rop('route-del', dest, a), rop('route-add', dest, r)], dest === '0.0.0.0/0') : null });
+      // every route the device has for it goes, then the model's is added
+      push: hop(r) ? P(`Route via ${hop(r)}`, [...list.map(x => rop('route-del', dest, x)), rop('route-add', dest, r)], dest === '0.0.0.0/0') : null });
   }
-  for (const [dest, a] of act) if (!plan.has(dest)) add({ key: `route-extra:${dest}`, area: 'route', sev: 'warn', text: `Route ${dest} via ${hop(a)} is on the device but not in the model`, planned: 'missing', actual: `${dest} ${hop(a)}`,
-    accept: { label: 'Add the route to the model', run: (lab, dev) => { if (!dev.routes.some(x => destKey(x.dest) === dest)) dev.routes.push({ dest, via: a.via || '', dev: a.via ? '' : (a.dev || '') }); } },
-    push: P('Delete the route on the device', [rop('route-del', dest, a)], dest === '0.0.0.0/0') });
+  for (const [dest, list] of act) if (!plan.has(dest)) for (const a of list)
+    add({ key: list.length === 1 ? `route-extra:${dest}` : `route-extra:${dest}:${hop(a)}`, area: 'route', sev: 'warn', text: `Route ${dest} via ${hop(a)} is on the device but not in the model`, planned: 'missing', actual: `${dest} ${hop(a)}`,
+      accept: { label: 'Add the route to the model', run: (lab, dev) => { if (!dev.routes.some(x => destKey(x.dest) === dest)) dev.routes.push({ dest, via: a.via || '', dev: a.via ? '' : (a.dev || '') }); } },
+      push: P('Delete the route on the device', [rop('route-del', dest, a)], dest === '0.0.0.0/0') });
 }
 
 function findRemote(lab, d, nb) {

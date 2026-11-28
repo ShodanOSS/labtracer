@@ -61,7 +61,8 @@ Target hardware: an 8th generation Intel Core i5 with 8 GB RAM and integrated gr
 |---|---|
 | `--port 9000` | Use a different port. |
 | `--no-browser` | Do not open a browser tab. |
-| `--host 127.0.0.1` | Bind address. Keep the default. Other values make the app available on your network without authentication. |
+| `--host 127.0.0.1` | Bind address. Keep the default. Other values make the app available on your network without authentication. With `0.0.0.0` (all addresses), the server accepts requests addressed to this computer's name and addresses; it prints them at start. |
+| `--allow-host NAME` | Another name or address the server is reached by, for example a DNS alias or a NAT address. Can be given more than once. Requests with any other name in the Host header are refused (this stops DNS rebinding). |
 
 To stop the server, push Ctrl+C in the terminal.
 
@@ -86,6 +87,9 @@ You can open `app/index.html` directly in the browser. In this mode, the app kee
 | `data/backups/<lab>/<device>/` | The config of a device from before each change LabTracer applied. |
 | `data/audit/<lab>.jsonl` | The audit log: every change, backup, rollback, restore, discovery and remote session. |
 | `data/remote.json` | The guacd address for remote access. |
+| `data/.deleted/<lab>.<time>/` | The facts, change sets, backups, discovery result and audit log of a lab you deleted, or replaced with a new lab of the same name. Nothing is lost, and a new lab with that name starts clean. |
+
+**Save as** copies the facts read from the devices to the new lab, so its Drift tab works at once. The change sets, backups and audit log stay with the original lab.
 
 If the same lab is open in two browser windows or tabs, a window cannot silently overwrite the other window's saved changes. Autosave stops in the window with the older version, and Ctrl+S asks which version to keep. If you replace the other version, a copy of it goes into `data/labs/.history/`.
 
@@ -547,19 +551,23 @@ A change set collects pushes for many devices, so you can review them as one cha
 
 1. In the Drift tab of a device, click **stage** on a difference (or **stage all**, or **Stage** in the push review). The first stage starts a change set. The Drift tab shows "N staged".
 2. Stage changes on other devices. A second stage for the same device adds to its item.
-3. In the lab panel, under **Changes and audit**, click **Review and apply**. The review shows, for each device in order, the changes, the commands, the file diffs and the notes. You can:
+3. In the lab panel, under **Changes and audit**, click **Review and apply**. The review shows, for each device in order, where LabTracer connects (user, host and port), the changes, the commands, the file diffs and the notes. You can:
    - give the change a title and a note (why, ticket, maintenance window);
    - move a device up or down (for example: change the access switches first, the core switch last);
-   - remove a change or a device;
+   - remove a change or a device (a change is removed as a whole: "Route via …" deletes the old route and adds the new one, and removing it removes both);
    - set the rollback timer, what to do when a device refuses a command, and **Stop at the first device that fails**;
    - **Discard** the change set.
 4. Click **Apply to N device(s)**. LabTracer applies the devices one after the other, each with the steps of [Apply](#push-the-model-to-a-device). With **Stop at the first device that fails**, the next devices are skipped. The review then shows each device's result, backup and transcript.
 
-server.py keeps the change sets in `data/changes/<lab>/`. A change set can only be applied in the version you reviewed: if it changed since (another window), LabTracer asks you to review it again. An applied or discarded change set can not change any more; **History** lists them all with their results.
+server.py keeps the change sets in `data/changes/<lab>/`. A change set can only be applied in the version you reviewed: if it changed since (another window), or a device now connects to another host, user or port, LabTracer asks you to review it again. An applied or discarded change set can not change any more; **History** lists them all with their results.
+
+If server.py stops while a change set is being applied, the change set shows as **interrupted** after the restart. Some devices may have the change and some not: check them with Collect, and read the audit log and the backups of the devices. Start a new change set for what is left.
 
 ### Audit log
 
-`data/audit/<lab>.jsonl` gets one line for each event: change sets created, staged, edited, discarded and applied; backups; rollback timers; applies (with the commands, the files and the transcript); confirmations, rollbacks, restores and saves; discoveries; remote sessions. Each line has the time, the user who runs LabTracer, the device and the result.
+`data/audit/<lab>.jsonl` gets one line for each event: change sets created, staged, edited, discarded, applied and interrupted; backups; rollback timers; applies (with the commands, the files and the transcript); confirmations, rollbacks, restores and saves; collect runs; discoveries; trusted host keys; SSH console and remote sessions. Each line has the time, the user who runs LabTracer, the device and the result.
+
+Events that belong to no lab (monitoring and remote access settings, archived labs, sessions opened without a lab) go to `data/audit/.server.jsonl`. Read it with `GET /api/audit/.server`.
 
 Open it with **Audit log** in the lab panel, or **Audit** in the Drift tab of a device (that device only). **Export** saves it as JSON Lines. Each entry holds the hash of the entry before it, so the viewer shows when a line was changed or removed ("chain intact"). This shows tampering; it does not prevent it.
 

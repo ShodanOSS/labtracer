@@ -193,3 +193,37 @@ test('push: changing the address LabTracer connects to is dangerous', () => {
   assert.deepEqual(it.push.ops, [{ op: 'iface-ip', port: 'wg0', ip: '10.99.0.9/24', old: ['10.99.0.2/24'] }]);
   assert.equal(it.push.danger, true);
 });
+
+test('two device routes for one destination: the model route is found, the other is reported', () => {
+  const lab = sample(), d = dev(lab, 'srv-01');
+  const f = facts('linux-pve');
+  const def = f.routes.find(r => r.dest === '0.0.0.0/0');
+  assert.ok(def, 'the fixture has a default route');
+  // a second default route with another metric (a laptop on Wi-Fi and Ethernet)
+  const two = { ...f, routes: [...f.routes, { dest: '0.0.0.0/0', via: '192.168.30.1', dev: '' }] };
+  let items = compareDevice(lab, d, two);
+  assert.ok(!items.some(it => it.key === 'route-via:0.0.0.0/0'), 'the model route exists: no "wrong next hop"');
+  const alt = items.find(it => it.key === 'route-alt:0.0.0.0/0:192.168.30.1');
+  assert.ok(alt, 'the second route is reported');
+  assert.deepEqual(alt.push.ops, [{ op: 'route-del', dest: '0.0.0.0/0', via: '192.168.30.1', dev: '' }]);
+  assert.ok(alt.push.danger);
+  // the second route listed first: same result (a Map by destination kept only the last one)
+  items = compareDevice(lab, d, { ...two, routes: [two.routes.at(-1), ...f.routes] });
+  assert.ok(!items.some(it => it.key === 'route-via:0.0.0.0/0'));
+  // neither is the model's: every one is deleted before the model's is added
+  const other = { ...f, routes: [...f.routes.filter(r => r.dest !== '0.0.0.0/0'), { dest: '0.0.0.0/0', via: '10.9.9.1', dev: '' }, { dest: '0.0.0.0/0', via: '10.9.9.2', dev: '' }] };
+  const via = compareDevice(lab, d, other).find(it => it.key === 'route-via:0.0.0.0/0');
+  assert.deepEqual(via.push.ops.map(o => `${o.op} ${o.via}`), ['route-del 10.9.9.1', 'route-del 10.9.9.2', `route-add ${def.via}`]);
+});
+
+test('a model description missing on the device is reported only when the driver reads descriptions', () => {
+  const lab = sample(), d = dev(lab, 'srv-01');
+  const f = facts('linux-pve');
+  const p = d.ports.find(x => f.interfaces.some(i => normPort(i.name) === normPort(x.name) && !i.desc) && ['eth', 'sfp', 'vport'].includes(x.kind));
+  assert.ok(p, 'a matched port without a device description');
+  p.desc = 'to the core switch';
+  const it = compareDevice(lab, d, { ...f, descriptions: true }).find(x => x.key === `desc:${p.id}`);
+  assert.ok(it, 'reported');
+  assert.deepEqual(it.push.ops.map(o => o.desc), ['to the core switch']);
+  assert.ok(!compareDevice(lab, d, { ...f, descriptions: false }).some(x => x.key === `desc:${p.id}`), 'not read: not reported');
+});

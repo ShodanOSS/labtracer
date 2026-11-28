@@ -53,12 +53,14 @@ export const store = {
    * keepCopy: keep a copy of the file that is replaced (the first save after a format upgrade).
    * oldVersion: its format version, for the name of the copy in browser storage.
    */
-  async saveLab(name, lab, { force = false, keepCopy = false, oldVersion = null } = {}) {
+  async saveLab(name, lab, { force = false, keepCopy = false, oldVersion = null, replace = false, copyOf = null } = {}) {
     const body = JSON.stringify(lab);
     if (this.mode === 'server') {
       const headers = { ...HDR, 'X-LabTracer-Base': this.versions[name] || 'new' };
       if (force) headers['X-LabTracer-Force'] = '1';
       if (keepCopy) headers['X-LabTracer-Keep-Copy'] = '1';
+      if (replace) headers['X-LabTracer-Replace'] = '1'; // a new lab replaces a saved one: its facts, change sets, backups and log are archived
+      if (copyOf) headers['X-LabTracer-Copy-Of'] = copyOf; // Save as: the new lab starts with the facts of this one
       const res = await j(await fetch('/api/labs/' + encodeURIComponent(name), { method: 'PUT', headers, body }));
       if (res.version) this.versions[name] = res.version;
       return res;

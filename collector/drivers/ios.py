@@ -40,6 +40,7 @@ def bad(text):
 
 def parse(o):
     f = new_facts(NAME)
+    f["descriptions"] = True  # interface descriptions come from the running config
     s = f["system"]
     s["vendor"] = "Cisco"
     run = o.get("run", "")
